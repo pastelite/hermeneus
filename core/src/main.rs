@@ -1,5 +1,4 @@
 use wiki_translate_client::fetch_page;
-use wiki_translate_client::fetcher::fetch_lang_links;
 
 #[tokio::main]
 async fn main() {

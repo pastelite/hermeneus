@@ -1,4 +1,5 @@
 pub mod fetcher;
+pub mod parser;
 use mwapi::Client;
 use wasm_bindgen::prelude::*;
 
