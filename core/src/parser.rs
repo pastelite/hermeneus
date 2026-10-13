@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::OnceLock};
 use crate::fetcher::LangLink;
 
 pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
-    let mut inside_template = false;
+    let mut template_depth = 0;
     let mut output = String::new();
     let mut table: HashMap<String, String> = HashMap::new();
 
@@ -16,46 +16,48 @@ pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     while let Some(current) = chars.next() {
         let next_char = chars.peek();
 
-        if inside_template {
-            if current == '}' && next_char == Some(&'}') {
-                inside_template = false;
-                // skip 1 char
+        if template_depth > 0 {
+            if current == '{' && next_char == Some(&'{') {
+                template_depth += 1;
+                current_buffer.push_str("{{");
                 chars.next();
-                // push template to hash map
-                // naming let's do templateName#numberifexists
+            } else if current == '}' && next_char == Some(&'}') {
+                template_depth -= 1;
+                chars.next();
 
-                let template_name = match current_buffer.find('|') {
-                    Some(num) => &current_buffer[..num],
-                    None => &current_buffer,
-                };
+                if template_depth == 0 {
+                    // push template to hash map
+                    // naming let's do templateName#numberifexists
+                    let template_name = match current_buffer.find('|') {
+                        Some(num) => &current_buffer[..num],
+                        None => &current_buffer,
+                    };
 
-                let existing_key = table
-                    .keys()
-                    .filter(|key| key.starts_with(template_name))
-                    .map(|key| key.to_string())
-                    .collect::<Vec<String>>();
-                let template_key = if existing_key.len() > 0 {
-                    format!("{}#{}", template_name, existing_key.len())
+                    let existing_key = table
+                        .keys()
+                        .filter(|key| key.starts_with(template_name))
+                        .map(|key| key.to_string())
+                        .collect::<Vec<String>>();
+                    let template_key = if existing_key.len() > 0 {
+                        format!("{}#{}", template_name, existing_key.len())
+                    } else {
+                        template_name.to_string()
+                    };
+
+                    // Move the completed template into the table and reset
+                    // the buffer so it can be reused for the next template.
+                    let template = std::mem::take(&mut current_buffer);
+                    output.push_str(format!("`[template:{}]`", &template_key).as_str());
+                    table.insert(template_key, template);
                 } else {
-                    template_name.to_string()
-                };
-
-                // let template_key = match existing_key {
-                //     Some(key) => format!("{}#{}", template_name, table.len()),
-                //     None => template_name.to_string(),
-                // };
-                // Move the completed template into the table and reset the
-                // buffer so it can be reused for the next template.
-                let template = std::mem::take(&mut current_buffer);
-                output.push_str(format!("`[template:{}]`", &template_key).as_str());
-                table.insert(template_key, template);
+                    current_buffer.push_str("}}");
+                }
             } else {
                 current_buffer.push(current);
             }
         } else {
             if current == '{' && next_char == Some(&'{') {
-                inside_template = true;
-                // skip 1 char
+                template_depth = 1;
                 chars.next();
             } else {
                 output.push(current);
@@ -64,6 +66,56 @@ pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     }
 
     (output, table)
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::stub_template;
+    use crate::restub::StubbedPage;
+    use std::collections::HashMap;
+
+    #[test]
+    fn stub_template_keeps_nested_templates_until_the_outer_template_closes() {
+        let wikitext =
+            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
+
+        let (stubbed, templates) = stub_template(wikitext);
+
+        assert_eq!(
+            stubbed,
+            "Before `[template:Outer]` after `[template:Sibling]`."
+        );
+        assert_eq!(
+            templates,
+            HashMap::from([
+                (
+                    "Outer".to_string(),
+                    "Outer|value={{Middle|value={{Inner}}}}".to_string()
+                ),
+                ("Sibling".to_string(), "Sibling|name=soy".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn stub_and_restub_nested_templates_round_trip() {
+        let wikitext =
+            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
+        let (stubbed, templates) = stub_template(wikitext);
+        let page = StubbedPage {
+            title: "Example".to_string(),
+            stubbed,
+            lang_links: Vec::new(),
+            template: templates,
+            references: HashMap::new(),
+        };
+
+        assert_eq!(
+            page.stubbed,
+            "Before `[template:Outer]` after `[template:Sibling]`."
+        );
+        assert_eq!(page.restub(), wikitext);
+    }
 }
 
 pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
@@ -163,7 +215,9 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
         // normal link label. Preserve the original wikitext so those fields
         // are never mistaken for a page-link label.
         if target.split_once(':').is_some_and(|(namespace, _)| {
-            namespace.eq_ignore_ascii_case("file") || namespace.eq_ignore_ascii_case("image")
+            namespace.eq_ignore_ascii_case("file")
+                || namespace.eq_ignore_ascii_case("image")
+                || namespace.eq_ignore_ascii_case("category")
         }) {
             continue;
         }
@@ -226,9 +280,17 @@ mod tests {
 
     #[test]
     fn stub_links_preserves_file_links_and_their_pipe_options() {
-        let wikitext = "[[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]]";
+        let wikitext = "{{Infobox|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
+        let (without_templates, templates) = stub_template(wikitext);
 
-        assert_eq!(stub_links(wikitext, &[]), wikitext);
+        assert_eq!(
+            templates.get("Infobox").map(String::as_str),
+            Some("Infobox|image=Soja_texturiert.jpg")
+        );
+        assert_eq!(
+            stub_links(&without_templates, &[]),
+            "`[template:Infobox]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
+        );
     }
 
     #[test]

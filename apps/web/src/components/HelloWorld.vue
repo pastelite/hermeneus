@@ -1,95 +1,60 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import heroImg from '../assets/hero.png'
-import viteLogo from '../assets/vite.svg'
-import vueLogo from '../assets/vue.svg'
+import { onMounted, ref, watch } from 'vue';
+import { fetch_stubbed_page, restub_page } from '../../pkg/wiki_translate_client';
 
-const count = ref(0)
+let title = ref('');
+let markdownText = ref('');
+let restubbedText = ref('');
+
+onMounted(() => {
+  title.value = localStorage.getItem('title') || '';
+})
+
+watch(title, () => {
+  localStorage.setItem('title', title.value);
+})
+
+function translate_page() {
+  fetch_stubbed_page('en', title.value).then((result) => {
+    let parsed = JSON.parse(result);
+    markdownText.value = parsed.stubbed;
+
+    let rewrappedData = {
+      title: parsed.title,
+      lang_links: parsed.lang_links,
+      template: parsed.template,
+      references: parsed.references,
+    };
+    localStorage.setItem('rewrappedData', JSON.stringify(rewrappedData));
+    
+    // markdownText.value = result;
+    // console.log(result);
+  });
+}
+
+function rewrap() {
+  let rewrappedData = localStorage.getItem('rewrappedData');
+  if (rewrappedData) {
+    let parsed = JSON.parse(rewrappedData);
+    let stubbedPage = {
+      stubbed: markdownText.value,
+      ...parsed
+    }
+
+    // console.log(stubbedPage);
+    let restubbed = restub_page(JSON.stringify(stubbedPage));
+    restubbedText.value = restubbed;
+  }
+}
 </script>
 
 <template>
-  <section id="center">
-    <div class="hero">
-      <img :src="heroImg" class="base" width="170" height="179" alt="" />
-      <img :src="vueLogo" class="framework" alt="Vue logo" />
-      <img :src="viteLogo" class="vite" alt="Vite logo" />
-    </div>
-    <div>
-      <h1>Get started</h1>
-      <p>Edit <code>src/App.vue</code> and save to test <code>HMR</code></p>
-    </div>
-    <button type="button" class="counter" @click="count++">
-      Count is {{ count }}
-    </button>
-  </section>
-
-  <div class="ticks"></div>
-
-  <section id="next-steps">
-    <div id="docs">
-      <svg class="icon" role="presentation" aria-hidden="true">
-        <use href="/icons.svg#documentation-icon"></use>
-      </svg>
-      <h2>Documentation</h2>
-      <p>Your questions, answered</p>
-      <ul>
-        <li>
-          <a href="https://vite.dev/" target="_blank">
-            <img class="logo" :src="viteLogo" alt="" />
-            Explore Vite
-          </a>
-        </li>
-        <li>
-          <a href="https://vuejs.org/" target="_blank">
-            <img class="button-icon" :src="vueLogo" alt="" />
-            Learn more
-          </a>
-        </li>
-      </ul>
-    </div>
-    <div id="social">
-      <svg class="icon" role="presentation" aria-hidden="true">
-        <use href="/icons.svg#social-icon"></use>
-      </svg>
-      <h2>Connect with us</h2>
-      <p>Join the Vite community</p>
-      <ul>
-        <li>
-          <a href="https://github.com/vitejs/vite" target="_blank">
-            <svg class="button-icon" role="presentation" aria-hidden="true">
-              <use href="/icons.svg#github-icon"></use>
-            </svg>
-            GitHub
-          </a>
-        </li>
-        <li>
-          <a href="https://chat.vite.dev/" target="_blank">
-            <svg class="button-icon" role="presentation" aria-hidden="true">
-              <use href="/icons.svg#discord-icon"></use>
-            </svg>
-            Discord
-          </a>
-        </li>
-        <li>
-          <a href="https://x.com/vite_js" target="_blank">
-            <svg class="button-icon" role="presentation" aria-hidden="true">
-              <use href="/icons.svg#x-icon"></use>
-            </svg>
-            X.com
-          </a>
-        </li>
-        <li>
-          <a href="https://bsky.app/profile/vite.dev" target="_blank">
-            <svg class="button-icon" role="presentation" aria-hidden="true">
-              <use href="/icons.svg#bluesky-icon"></use>
-            </svg>
-            Bluesky
-          </a>
-        </li>
-      </ul>
-    </div>
-  </section>
-
-  <div class="ticks"></div>
-  <section id="spacer"></section>
+  <h1>Wikipedia Translator</h1>
+  <input v-model="title" placeholder="Enter English Wikipedia page title">
+  <button @click="translate_page">Translate</button>
+  <h2>Markdown Output</h2>
+  <textarea v-model="markdownText"></textarea>
+  <button @click="rewrap">rewrap</button>
+  <h2>Restubbed Output</h2>
+  <textarea v-model="restubbedText"></textarea>
 </template>
