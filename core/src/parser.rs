@@ -3,6 +3,8 @@
 use regex::Regex;
 use std::{collections::HashMap, sync::OnceLock};
 
+use crate::fetcher::LangLink;
+
 pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     let mut inside_template = false;
     let mut output = String::new();
@@ -134,10 +136,82 @@ pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
     (output, references)
 }
 
+pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
+    let lang_links_map: HashMap<&str, &str> = lang_links
+        .iter()
+        .map(|link| (link.english_title.as_str(), link.title.as_str()))
+        .collect();
+
+    static LINK: OnceLock<Regex> = OnceLock::new();
+    let link = LINK.get_or_init(|| {
+        Regex::new(r"\[\[(?P<target>[^\[\]|]+)(?:\|(?P<label>[^\[\]]*))?\]\]")
+            .expect("link regex is valid")
+    });
+
+    let mut replacements = Vec::new();
+
+    for captures in link.captures_iter(wikitext) {
+        let whole_link = captures.get(0).expect("whole link match exists");
+        let target = captures
+            .name("target")
+            .expect("link target match exists")
+            .as_str()
+            .trim();
+        let label = captures
+            .name("label")
+            .map_or(target, |capture| capture.as_str().trim());
+
+        // MediaWiki treats underscores and spaces equivalently in page titles.
+        let lookup_title = target.replace('_', " ");
+        let destination = lang_links_map
+            .get(lookup_title.as_str())
+            .copied()
+            .unwrap_or(target);
+
+        replacements.push((
+            whole_link.start()..whole_link.end(),
+            format!("[{label}]({destination})"),
+        ));
+    }
+
+    let mut output = wikitext.to_string();
+    for (range, replacement) in replacements.into_iter().rev() {
+        output.replace_range(range, &replacement);
+    }
+
+    output
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fetcher::Fetcher;
+
+    #[test]
+    fn stub_links_uses_translations_and_keeps_untranslated_targets() {
+        let lang_links = [
+            LangLink {
+                english_title: "123".to_string(),
+                title: "123Translated".to_string(),
+                lang: "th".to_string(),
+            },
+            LangLink {
+                english_title: "ABC".to_string(),
+                title: "ABCTranslated".to_string(),
+                lang: "th".to_string(),
+            },
+        ];
+
+        let output = stub_links(
+            "[[123|ABC]] [[ABC]] [[Missing|Shown]] [[Plain]]",
+            &lang_links,
+        );
+
+        assert_eq!(
+            output,
+            "[ABC](123Translated) [ABC](ABCTranslated) [Shown](Missing) [Plain](Plain)"
+        );
+    }
 
     #[test]
     fn stub_ref_reuses_named_refs_and_numbers_unnamed_refs() {

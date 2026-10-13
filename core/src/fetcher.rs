@@ -1,5 +1,8 @@
 use mwapi::Client;
 
+use crate::parser::{stub_links, stub_ref, stub_template};
+use crate::restub::StubbedPage;
+
 pub struct Fetcher {
     client: Client,
 }
@@ -117,6 +120,34 @@ impl Fetcher {
             .ok_or_else(|| "MediaWiki response did not contain wikitext".to_string())?
             .to_string())
     }
+
+    pub async fn fetch_links_with_langlinks(&self, page: &str) -> Result<Vec<LangLink>, String> {
+        let links = self.fetch_links(page).await?;
+        let links_list = links
+            .iter()
+            .map(|link| link.title.as_str())
+            .collect::<Vec<_>>();
+
+        let lang_links = self.fetch_lang_links(&links_list).await?;
+        Ok(lang_links)
+    }
+
+    pub async fn get_stubbed_page(&self, page: &str) -> Result<StubbedPage, String> {
+        let wikitext = self.fetch_wikitext(page).await?;
+        let links = self.fetch_links_with_langlinks(page).await?;
+
+        let (template_wikitext, template_map) = stub_template(&wikitext);
+        let (reference_wikitext, reference_map) = stub_ref(&template_wikitext);
+        let link_wikitext = stub_links(&reference_wikitext, &links);
+
+        Ok(StubbedPage {
+            title: page.to_string(),
+            stubbed: link_wikitext,
+            lang_links: links,
+            template: template_map,
+            references: reference_map,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -166,5 +197,19 @@ mod tests {
         let fetcher = Fetcher::new("en").await.unwrap();
         let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
         println!("{:#?}", wikitext);
+    }
+
+    #[tokio::test]
+    async fn fetch_links_with_langlinks_works() {
+        let fetcher = Fetcher::new("en").await.unwrap();
+        let links = fetcher.fetch_links_with_langlinks("Hello").await.unwrap();
+        println!("{:#?}", links);
+    }
+
+    #[tokio::test]
+    async fn get_stubbed_page_works() {
+        let fetcher = Fetcher::new("en").await.unwrap();
+        let page = fetcher.get_stubbed_page("Hello").await.unwrap();
+        println!("{:#?}", page);
     }
 }
