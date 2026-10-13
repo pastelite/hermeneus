@@ -157,6 +157,17 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
             .expect("link target match exists")
             .as_str()
             .trim();
+
+        // File links use their pipe-delimited fields for display options and
+        // captions (for example `[[File:photo.jpg|thumb|Caption]]`), not as a
+        // normal link label. Preserve the original wikitext so those fields
+        // are never mistaken for a page-link label.
+        if target.split_once(':').is_some_and(|(namespace, _)| {
+            namespace.eq_ignore_ascii_case("file") || namespace.eq_ignore_ascii_case("image")
+        }) {
+            continue;
+        }
+
         let label = captures
             .name("label")
             .map_or(target, |capture| capture.as_str().trim());
@@ -211,6 +222,13 @@ mod tests {
             output,
             "[ABC](123Translated) [ABC](ABCTranslated) [Shown](Missing) [Plain](Plain)"
         );
+    }
+
+    #[test]
+    fn stub_links_preserves_file_links_and_their_pipe_options() {
+        let wikitext = "[[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]]";
+
+        assert_eq!(stub_links(wikitext, &[]), wikitext);
     }
 
     #[test]

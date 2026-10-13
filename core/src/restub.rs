@@ -1,4 +1,5 @@
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -7,7 +8,7 @@ use std::{
 
 use crate::fetcher::LangLink;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StubbedPage {
     pub title: String,
     pub stubbed: String,
@@ -17,6 +18,16 @@ pub struct StubbedPage {
 }
 
 impl StubbedPage {
+    /// Serializes this page and all stubbing metadata as JSON.
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|error| error.to_string())
+    }
+
+    /// Restores a page and its stubbing metadata from JSON.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        serde_json::from_str(json).map_err(|error| error.to_string())
+    }
+
     /// Restores the stubbed Markdown-like text to MediaWiki wikitext.
     pub fn restub(&self) -> String {
         let wikitext = restub_links(&self.stubbed, &self.lang_links);
@@ -170,5 +181,26 @@ mod tests {
             page.restub(),
             "<ref name=\"source\">Citation</ref> and <ref name=\"source\" />"
         );
+    }
+
+    #[test]
+    fn stubbed_page_json_round_trip_preserves_restub_data() {
+        let page = StubbedPage {
+            title: "Example".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox]`".to_string(),
+            lang_links: vec![LangLink {
+                english_title: "ABC".to_string(),
+                title: "ABCTranslated".to_string(),
+                lang: "th".to_string(),
+            }],
+            template: HashMap::from([("Infobox".to_string(), "Infobox|name=Example".to_string())]),
+            references: HashMap::from([("source".to_string(), "Citation".to_string())]),
+        };
+
+        let serialized = page.to_json().unwrap();
+        let restored = StubbedPage::from_json(&serialized).unwrap();
+
+        assert_eq!(restored.title, page.title);
+        assert_eq!(restored.restub(), page.restub());
     }
 }

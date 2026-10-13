@@ -1,7 +1,11 @@
 use mwapi::Client;
+use serde::{Deserialize, Serialize};
 
 use crate::parser::{stub_links, stub_ref, stub_template};
 use crate::restub::StubbedPage;
+
+/// MediaWiki's maximum number of titles accepted in one `titles` request.
+pub const MAX_TITLES_PER_REQUEST: usize = 50;
 
 pub struct Fetcher {
     client: Client,
@@ -54,52 +58,60 @@ impl Fetcher {
     }
 
     pub async fn fetch_lang_links(&self, page: &[&str]) -> Result<Vec<LangLink>, String> {
-        let formatted_titles = page.join("|");
+        let mut lang_links = Vec::new();
 
-        let response = self
-            .client
-            .get_value(&[
-                ("action", "query"),
-                ("titles", &formatted_titles),
-                ("prop", "langlinks"),
-                ("lllang", "th"),
-                ("formatversion", "2"),
-                ("format", "json"),
-                ("origin", "*"),
-            ])
-            .await
-            .map_err(|err| err.to_string())?;
+        for titles in page.chunks(MAX_TITLES_PER_REQUEST) {
+            let formatted_titles = titles.join("|");
 
-        let pages = response["query"]["pages"]
-            .as_array()
-            .ok_or_else(|| "MediaWiki response did not contain a pages array".to_string())?;
+            let response = self
+                .client
+                .get_value(&[
+                    ("action", "query"),
+                    ("titles", &formatted_titles),
+                    ("prop", "langlinks"),
+                    ("lllang", "th"),
+                    ("formatversion", "2"),
+                    ("format", "json"),
+                    ("origin", "*"),
+                ])
+                .await
+                .map_err(|err| err.to_string())?;
 
-        pages
-            .iter()
-            .filter_map(|page| {
-                page["langlinks"]
-                    .as_array()?
-                    .first()
-                    .map(|link| (page, link))
-            })
-            .map(|(page, link)| {
-                let english_title = page["title"]
-                    .as_str()
-                    .ok_or_else(|| "MediaWiki page did not contain a title".to_string())?;
-                let title = link["title"]
-                    .as_str()
-                    .ok_or_else(|| "MediaWiki language link did not contain a title".to_string())?;
-                let lang = link["lang"].as_str().ok_or_else(|| {
-                    "MediaWiki language link did not contain a language".to_string()
-                })?;
+            let pages = response["query"]["pages"]
+                .as_array()
+                .ok_or_else(|| "MediaWiki response did not contain a pages array".to_string())?;
 
-                Ok(LangLink {
-                    english_title: english_title.to_string(),
-                    title: title.to_string(),
-                    lang: lang.to_string(),
+            let batch = pages
+                .iter()
+                .filter_map(|page| {
+                    page["langlinks"]
+                        .as_array()?
+                        .first()
+                        .map(|link| (page, link))
                 })
-            })
-            .collect::<Result<Vec<_>, String>>()
+                .map(|(page, link)| {
+                    let english_title = page["title"]
+                        .as_str()
+                        .ok_or_else(|| "MediaWiki page did not contain a title".to_string())?;
+                    let title = link["title"].as_str().ok_or_else(|| {
+                        "MediaWiki language link did not contain a title".to_string()
+                    })?;
+                    let lang = link["lang"].as_str().ok_or_else(|| {
+                        "MediaWiki language link did not contain a language".to_string()
+                    })?;
+
+                    Ok(LangLink {
+                        english_title: english_title.to_string(),
+                        title: title.to_string(),
+                        lang: lang.to_string(),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+
+            lang_links.extend(batch);
+        }
+
+        Ok(lang_links)
     }
 
     pub async fn fetch_wikitext(&self, page: &str) -> Result<String, String> {
@@ -156,7 +168,7 @@ pub struct Link {
     pub exists: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct LangLink {
     pub english_title: String,
     pub title: String,

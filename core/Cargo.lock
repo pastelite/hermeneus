@@ -1363,6 +1363,7 @@ version = "0.1.0"
 dependencies = [
  "mwapi",
  "regex",
+ "serde",
  "serde_json",
  "tokio",
  "wasm-bindgen",
