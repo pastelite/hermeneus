@@ -1,1 +1,1 @@
-wasm-pack build --target bundler --output ../apps/web/pkg
+wasm-pack build --target bundler --out-dir ../apps/web/pkg
