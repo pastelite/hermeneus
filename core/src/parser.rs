@@ -68,56 +68,6 @@ pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     (output, table)
 }
 
-#[cfg(test)]
-mod template_tests {
-    use super::stub_template;
-    use crate::restub::StubbedPage;
-    use std::collections::HashMap;
-
-    #[test]
-    fn stub_template_keeps_nested_templates_until_the_outer_template_closes() {
-        let wikitext =
-            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
-
-        let (stubbed, templates) = stub_template(wikitext);
-
-        assert_eq!(
-            stubbed,
-            "Before `[template:Outer]` after `[template:Sibling]`."
-        );
-        assert_eq!(
-            templates,
-            HashMap::from([
-                (
-                    "Outer".to_string(),
-                    "Outer|value={{Middle|value={{Inner}}}}".to_string()
-                ),
-                ("Sibling".to_string(), "Sibling|name=soy".to_string()),
-            ])
-        );
-    }
-
-    #[test]
-    fn stub_and_restub_nested_templates_round_trip() {
-        let wikitext =
-            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
-        let (stubbed, templates) = stub_template(wikitext);
-        let page = StubbedPage {
-            title: "Example".to_string(),
-            stubbed,
-            lang_links: Vec::new(),
-            template: templates,
-            references: HashMap::new(),
-        };
-
-        assert_eq!(
-            page.stubbed,
-            "Before `[template:Outer]` after `[template:Sibling]`."
-        );
-        assert_eq!(page.restub(), wikitext);
-    }
-}
-
 pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
     // Matches paired refs like `<ref>citation</ref>` and self-closing refs
     // like `<ref name="source" />`. It captures the opening-tag attributes
@@ -235,7 +185,7 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
 
         replacements.push((
             whole_link.start()..whole_link.end(),
-            format!("[{label}]({destination})"),
+            format!("[{label}]({})", markdown_link_destination(destination)),
         ));
     }
 
@@ -247,10 +197,123 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
     output
 }
 
+pub fn stub_title(wikitext: &str) -> String {
+    static TITLE: OnceLock<Regex> = OnceLock::new();
+    let title = TITLE.get_or_init(|| {
+        Regex::new(r"(?m)^(?P<open>={2,})[ \t]*(?P<title>.*?)[ \t]*(?P<close>={2,})[ \t]*$")
+            .expect("title regex is valid")
+    });
+
+    title
+        .replace_all(wikitext, |captures: &regex::Captures<'_>| {
+            let open = captures
+                .name("open")
+                .expect("opening markers exist")
+                .as_str();
+            let close = captures
+                .name("close")
+                .expect("closing markers exist")
+                .as_str();
+            if open.len() != close.len() {
+                return captures
+                    .get(0)
+                    .expect("whole heading exists")
+                    .as_str()
+                    .to_string();
+            }
+
+            let heading = captures
+                .name("title")
+                .expect("heading text exists")
+                .as_str();
+            format!("{} {}", "#".repeat(open.len()), heading.trim())
+        })
+        .into_owned()
+}
+
+fn markdown_link_destination(destination: &str) -> String {
+    if destination.chars().any(|character| {
+        character.is_whitespace() || matches!(character, '(' | ')' | '<' | '>' | '\\')
+    }) {
+        let escaped = destination
+            .replace('\\', "\\\\")
+            .replace('<', "\\<")
+            .replace('>', "\\>");
+        format!("<{escaped}>")
+    } else {
+        destination.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fetcher::Fetcher;
+    use crate::restub::StubbedPage;
+    use std::collections::HashMap;
+
+    #[test]
+    fn stub_title_converts_wikitext_heading_levels_to_markdown() {
+        assert_eq!(
+            stub_title("==test==\n=== abc ===\n==== def ====\n===== ghi =====\n====== jkl ======"),
+            "## test\n### abc\n#### def\n##### ghi\n###### jkl"
+        );
+        assert_eq!(stub_title("== mismatched ==="), "== mismatched ===");
+    }
+
+    #[test]
+    fn stub_and_restub_title_round_trip() {
+        let wikitext = "Before\n== test ==\n=== abc ===\n==== def ====\nAfter";
+        let page = StubbedPage {
+            stubbed: stub_title(wikitext),
+            template: HashMap::new(),
+            references: HashMap::new(),
+        };
+
+        assert_eq!(page.stubbed, "Before\n## test\n### abc\n#### def\nAfter");
+        assert_eq!(page.restub(), wikitext);
+    }
+
+    #[test]
+    fn stub_template_keeps_nested_templates_until_the_outer_template_closes() {
+        let wikitext =
+            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
+
+        let (stubbed, templates) = stub_template(wikitext);
+
+        assert_eq!(
+            stubbed,
+            "Before `[template:Outer]` after `[template:Sibling]`."
+        );
+        assert_eq!(
+            templates,
+            HashMap::from([
+                (
+                    "Outer".to_string(),
+                    "Outer|value={{Middle|value={{Inner}}}}".to_string()
+                ),
+                ("Sibling".to_string(), "Sibling|name=soy".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn stub_and_restub_nested_templates_round_trip() {
+        let wikitext =
+            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
+        let (stubbed, templates) = stub_template(wikitext);
+        let page = StubbedPage {
+            stubbed,
+            template: templates,
+            references: HashMap::new(),
+        };
+
+        assert_eq!(
+            page.stubbed,
+            "Before `[template:Outer]` after `[template:Sibling]`."
+        );
+        assert_eq!(page.restub(), wikitext);
+    }
 
     #[test]
     fn stub_links_uses_translations_and_keeps_untranslated_targets() {
@@ -275,6 +338,14 @@ mod tests {
         assert_eq!(
             output,
             "[ABC](123Translated) [ABC](ABCTranslated) [Shown](Missing) [Plain](Plain)"
+        );
+    }
+
+    #[test]
+    fn stub_links_angle_brackets_destinations_with_spaces_or_parentheses() {
+        assert_eq!(
+            stub_links("[[ABC (link)|Stuff]] [[Some page]]", &[]),
+            "[Stuff](<ABC (link)>) [Some page](<Some page>)"
         );
     }
 
