@@ -11,6 +11,8 @@ pub struct StubbedPage {
     pub stubbed: String,
     pub template: HashMap<String, String>,
     pub references: HashMap<String, String>,
+    #[serde(default)]
+    pub links: Vec<crate::fetcher::LinkTableRow>,
 }
 
 impl StubbedPage {
@@ -145,26 +147,78 @@ fn restub_references(wikitext: &str, references: &HashMap<String, String>) -> St
 }
 
 fn restub_templates(wikitext: &str, templates: &HashMap<String, String>) -> String {
-    static TEMPLATE: OnceLock<Regex> = OnceLock::new();
-    let template = TEMPLATE.get_or_init(|| {
-        Regex::new(r"`\[template:(?P<key>[^\]]+)\]`").expect("template placeholder regex is valid")
-    });
+    const PREFIX: &str = "`[template:";
+    let mut replacements = Vec::new();
+    let mut search_from = 0;
 
-    let replacements = template
-        .captures_iter(wikitext)
-        .filter_map(|captures| {
-            let whole_template = captures.get(0)?;
-            let key = captures.name("key")?.as_str();
-            let value = templates.get(key)?;
+    while let Some(prefix_offset) = wikitext[search_from..].find(PREFIX) {
+        let start = search_from + prefix_offset;
+        let body_start = start + PREFIX.len();
+        let mut escaped = false;
+        let mut closing_bracket = None;
 
-            Some((
-                whole_template.start()..whole_template.end(),
-                format!("{{{{{value}}}}}"),
-            ))
-        })
-        .collect();
+        for (offset, character) in wikitext[body_start..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if character == '\\' {
+                escaped = true;
+                continue;
+            }
+            if character == ']' && wikitext[body_start + offset + 1..].starts_with('`') {
+                closing_bracket = Some(body_start + offset);
+                break;
+            }
+        }
+
+        let Some(closing_bracket) = closing_bracket else {
+            break;
+        };
+        let body = unescape_template_token(&wikitext[body_start..closing_bracket]);
+        let restored = if let Some(value) = templates.get(&body) {
+            format!("{{{{{value}}}}}")
+        } else if is_template_map_key(&body) {
+            search_from = closing_bracket + 2;
+            continue;
+        } else {
+            format!("{{{{{body}}}}}")
+        };
+        let end = closing_bracket + 2;
+        replacements.push((start..end, restored));
+        search_from = end;
+    }
 
     apply_replacements(wikitext.to_string(), replacements)
+}
+
+fn is_template_map_key(template: &str) -> bool {
+    if template.contains('|') {
+        return false;
+    }
+    let Some((_, number)) = template.rsplit_once('#') else {
+        return false;
+    };
+    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+}
+
+fn unescape_template_token(template: &str) -> String {
+    let mut characters = template.chars().peekable();
+    let mut output = String::new();
+
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && characters
+                .peek()
+                .is_some_and(|next| matches!(next, '\\' | ']'))
+        {
+            output.push(characters.next().expect("peeked character exists"));
+        } else {
+            output.push(character);
+        }
+    }
+
+    output
 }
 
 fn apply_replacements(mut text: String, replacements: Vec<(Range<usize>, String)>) -> String {
@@ -190,12 +244,16 @@ mod tests {
     #[test]
     fn restubs_links_references_and_templates() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] [^2] `[template:Infobox]`".to_string(),
-            template: HashMap::from([("Infobox".to_string(), "Infobox|name=Example".to_string())]),
+            stubbed: "[ABC](ABCTranslated) [^source] [^2] `[template:Infobox#1]`".to_string(),
+            template: HashMap::from([(
+                "Infobox#1".to_string(),
+                "Infobox|name=Example".to_string(),
+            )]),
             references: HashMap::from([
                 ("source".to_string(), "Citation".to_string()),
                 ("2".to_string(), "Unnamed citation".to_string()),
             ]),
+            links: Vec::new(),
         };
 
         assert_eq!(
@@ -210,6 +268,7 @@ mod tests {
             stubbed: "[โดเมน](<โดเมน (ชีววิทยา)>)".to_string(),
             template: HashMap::new(),
             references: HashMap::new(),
+            links: Vec::new(),
         };
 
         assert_eq!(page.restub(), "[[โดเมน (ชีววิทยา)|โดเมน]]");
@@ -221,6 +280,7 @@ mod tests {
             stubbed: "[^source] and [^source]".to_string(),
             template: HashMap::new(),
             references: HashMap::from([("source".to_string(), "Citation".to_string())]),
+            links: Vec::new(),
         };
 
         assert_eq!(
@@ -232,15 +292,23 @@ mod tests {
     #[test]
     fn stubbed_page_json_round_trip_preserves_restub_data() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox]`".to_string(),
-            template: HashMap::from([("Infobox".to_string(), "Infobox|name=Example".to_string())]),
+            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox#1]`".to_string(),
+            template: HashMap::from([(
+                "Infobox#1".to_string(),
+                "Infobox|name=Example".to_string(),
+            )]),
             references: HashMap::from([("source".to_string(), "Citation".to_string())]),
+            links: vec![crate::fetcher::LinkTableRow {
+                title: "ABC".to_string(),
+                link_to: "ABC".to_string(),
+                translated: Some("ABCTranslated".to_string()),
+            }],
         };
 
         let serialized = page.to_json().unwrap();
         let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 3);
-        assert!(value.get("lang_links").is_none());
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert_eq!(value["links"][0]["link_to"], "ABC");
         assert!(value.get("title").is_none());
 
         let restored = StubbedPage::from_json(&serialized).unwrap();

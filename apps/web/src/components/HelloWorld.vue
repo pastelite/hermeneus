@@ -2,11 +2,18 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { fetch_stubbed_page, get_full_prompt, restub_page } from '../../pkg/wiki_translate_client.js';
 
+type LinkTableRow = {
+  title: string;
+  link_to: string;
+  translated: string | null;
+};
+
 let title = ref('');
 let originalMarkdownText = ref('');
 let markdownText = ref('');
 let restubbedText = ref('');
 let copyStatus = ref('');
+let linkTableRows = ref<LinkTableRow[]>([]);
 
 let placeholder = computed(()=>{
   return "Place your translated markdown here:\n" + originalMarkdownText.value
@@ -14,6 +21,14 @@ let placeholder = computed(()=>{
 
 onMounted(() => {
   title.value = localStorage.getItem('title') || '';
+  const savedData = localStorage.getItem('rewrappedData');
+  if (savedData) {
+    try {
+      linkTableRows.value = JSON.parse(savedData).links || [];
+    } catch {
+      linkTableRows.value = [];
+    }
+  }
 })
 
 watch(title, () => {
@@ -26,10 +41,12 @@ function translate_page() {
     originalMarkdownText.value = parsed.stubbed;
     markdownText.value = '';
     copyStatus.value = '';
+    linkTableRows.value = parsed.links || [];
 
     let rewrappedData = {
       template: parsed.template,
       references: parsed.references,
+      links: linkTableRows.value,
     };
     localStorage.setItem('rewrappedData', JSON.stringify(rewrappedData));
     
@@ -45,7 +62,9 @@ async function copyOriginalMarkdownWithPrompt() {
     const clipboard = (navigator as Navigator & {
       clipboard: { writeText(text: string): Promise<void> };
     }).clipboard;
-    await clipboard.writeText(get_full_prompt(originalMarkdownText.value));
+    await clipboard.writeText(
+      get_full_prompt(originalMarkdownText.value, JSON.stringify(linkTableRows.value)),
+    );
     copyStatus.value = 'Original markdown and prompt copied.';
   } catch {
     copyStatus.value = 'Could not copy to clipboard. Check browser clipboard permissions.';

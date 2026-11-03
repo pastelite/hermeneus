@@ -5,10 +5,33 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::fetcher::LangLink;
 
+/// Templates with simple bodies can stay inline in the Markdown placeholder
+/// instead of taking an entry in the saved-template map.
+pub const TEMPLATE_WHITELIST: &[&str] = &[
+    "big",
+    "lang",
+    "nowrap",
+    "small",
+    "smaller",
+    "smallcaps",
+    "sc",
+    "convert",
+    "lang-*",
+    "langx",
+];
+
 pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
+    stub_template_with_whitelist(wikitext, TEMPLATE_WHITELIST)
+}
+
+pub fn stub_template_with_whitelist(
+    wikitext: &str,
+    whitelist: &[&str],
+) -> (String, HashMap<String, String>) {
     let mut template_depth = 0;
     let mut output = String::new();
     let mut table: HashMap<String, String> = HashMap::new();
+    let mut template_counts: HashMap<String, usize> = HashMap::new();
 
     let mut chars = wikitext.chars().peekable();
     let mut current_buffer = String::new();
@@ -26,29 +49,39 @@ pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
                 chars.next();
 
                 if template_depth == 0 {
-                    // push template to hash map
-                    // naming let's do templateName#numberifexists
                     let template_name = match current_buffer.find('|') {
                         Some(num) => &current_buffer[..num],
                         None => &current_buffer,
-                    };
+                    }
+                    .trim()
+                    .to_string();
+                    let normalized_template_name = template_name
+                        .strip_prefix("Template:")
+                        .or_else(|| template_name.strip_prefix("template:"))
+                        .unwrap_or(&template_name)
+                        .trim();
 
-                    let existing_key = table
-                        .keys()
-                        .filter(|key| key.starts_with(template_name))
-                        .map(|key| key.to_string())
-                        .collect::<Vec<String>>();
-                    let template_key = if existing_key.len() > 0 {
-                        format!("{}#{}", template_name, existing_key.len())
-                    } else {
-                        template_name.to_string()
-                    };
-
-                    // Move the completed template into the table and reset
-                    // the buffer so it can be reused for the next template.
                     let template = std::mem::take(&mut current_buffer);
-                    output.push_str(format!("`[template:{}]`", &template_key).as_str());
-                    table.insert(template_key, template);
+                    if whitelist
+                        .iter()
+                        .any(|pattern| template_name_matches(pattern, normalized_template_name))
+                    {
+                        output.push_str(&format!(
+                            "`[template:{}]`",
+                            escape_template_token(&template)
+                        ));
+                    } else {
+                        let count = template_counts
+                            .entry(template_name.clone())
+                            .and_modify(|count| *count += 1)
+                            .or_insert(1);
+                        let template_key = format!("{}#{}", template_name, count);
+                        output.push_str(&format!(
+                            "`[template:{}]`",
+                            escape_template_token(&template_key)
+                        ));
+                        table.insert(template_key, template);
+                    }
                 } else {
                     current_buffer.push_str("}}");
                 }
@@ -66,6 +99,19 @@ pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     }
 
     (output, table)
+}
+
+fn escape_template_token(template: &str) -> String {
+    template.replace('\\', "\\\\").replace(']', "\\]")
+}
+
+fn template_name_matches(pattern: &str, template_name: &str) -> bool {
+    let Some(prefix) = pattern.strip_suffix('*') else {
+        return pattern.eq_ignore_ascii_case(template_name);
+    };
+    template_name
+        .get(..prefix.len())
+        .is_some_and(|name_prefix| name_prefix.eq_ignore_ascii_case(prefix))
 }
 
 pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
@@ -144,11 +190,7 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
         .map(|link| (link.english_title.as_str(), link.title.as_str()))
         .collect();
 
-    static LINK: OnceLock<Regex> = OnceLock::new();
-    let link = LINK.get_or_init(|| {
-        Regex::new(r"\[\[(?P<target>[^\[\]|]+)(?:\|(?P<label>[^\[\]]*))?\]\]")
-            .expect("link regex is valid")
-    });
+    let link = wikilink_regex();
 
     let mut replacements = Vec::new();
 
@@ -177,7 +219,8 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
             .map_or(target, |capture| capture.as_str().trim());
 
         // MediaWiki treats underscores and spaces equivalently in page titles.
-        let lookup_title = target.replace('_', " ");
+        let page_target = target.split_once('#').map_or(target, |(title, _)| title);
+        let lookup_title = page_target.replace('_', " ");
         let destination = lang_links_map
             .get(lookup_title.as_str())
             .copied()
@@ -195,6 +238,61 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
     }
 
     output
+}
+
+/// Return page-link targets as they appear in the source wikitext. MediaWiki's
+/// parsed links API canonicalizes titles (and follows some redirects), which
+/// can otherwise leave the stubbing step without a langlink keyed by the
+/// original target spelling.
+pub fn wikilink_targets(wikitext: &str) -> Vec<String> {
+    wikilinks(wikitext)
+        .into_iter()
+        .map(|(_, target)| target)
+        .collect()
+}
+
+/// Return each article link's displayed text and page target, excluding
+/// non-article namespaces and section fragments from the target.
+pub fn wikilinks(wikitext: &str) -> Vec<(String, String)> {
+    wikilink_regex()
+        .captures_iter(wikitext)
+        .filter_map(|captures| {
+            let original_target = captures.name("target")?.as_str().trim();
+            if original_target
+                .split_once(':')
+                .is_some_and(|(namespace, _)| {
+                    namespace.eq_ignore_ascii_case("file")
+                        || namespace.eq_ignore_ascii_case("image")
+                        || namespace.eq_ignore_ascii_case("category")
+                })
+            {
+                return None;
+            }
+
+            // A fragment identifies a section, not a separate Wikipedia page.
+            let target = original_target
+                .split_once('#')
+                .map_or(original_target, |(title, _)| title)
+                .trim();
+            if target.is_empty() {
+                return None;
+            }
+
+            let label = captures
+                .name("label")
+                .map(|label| label.as_str().trim())
+                .unwrap_or(original_target);
+            Some((label.to_string(), target.to_string()))
+        })
+        .collect()
+}
+
+fn wikilink_regex() -> &'static Regex {
+    static LINK: OnceLock<Regex> = OnceLock::new();
+    LINK.get_or_init(|| {
+        Regex::new(r"\[\[(?P<target>[^\[\]|]+)(?:\|(?P<label>[^\[\]]*))?\]\]")
+            .expect("link regex is valid")
+    })
 }
 
 pub fn stub_title(wikitext: &str) -> String {
@@ -268,6 +366,7 @@ mod tests {
             stubbed: stub_title(wikitext),
             template: HashMap::new(),
             references: HashMap::new(),
+            links: Vec::new(),
         };
 
         assert_eq!(page.stubbed, "Before\n## test\n### abc\n#### def\nAfter");
@@ -283,16 +382,16 @@ mod tests {
 
         assert_eq!(
             stubbed,
-            "Before `[template:Outer]` after `[template:Sibling]`."
+            "Before `[template:Outer#1]` after `[template:Sibling#1]`."
         );
         assert_eq!(
             templates,
             HashMap::from([
                 (
-                    "Outer".to_string(),
+                    "Outer#1".to_string(),
                     "Outer|value={{Middle|value={{Inner}}}}".to_string()
                 ),
-                ("Sibling".to_string(), "Sibling|name=soy".to_string()),
+                ("Sibling#1".to_string(), "Sibling|name=soy".to_string()),
             ])
         );
     }
@@ -306,13 +405,66 @@ mod tests {
             stubbed,
             template: templates,
             references: HashMap::new(),
+            links: Vec::new(),
         };
 
         assert_eq!(
             page.stubbed,
-            "Before `[template:Outer]` after `[template:Sibling]`."
+            "Before `[template:Outer#1]` after `[template:Sibling#1]`."
         );
         assert_eq!(page.restub(), wikitext);
+    }
+
+    #[test]
+    fn stub_template_numbers_repeated_template_names_with_a_separate_counter_map() {
+        let (stubbed, templates) =
+            stub_template("{{Box|one}} {{Box|two}} {{Other|three}} {{Box|four}}");
+
+        assert_eq!(
+            stubbed,
+            "`[template:Box#1]` `[template:Box#2]` `[template:Other#1]` `[template:Box#3]`"
+        );
+        assert_eq!(templates.get("Box#2").map(String::as_str), Some("Box|two"));
+        assert_eq!(templates.len(), 4);
+    }
+
+    #[test]
+    fn whitelisted_templates_stay_inline_and_escape_closing_brackets() {
+        let wikitext = r"{{small|text [[Target|label]] and \ path}}";
+        let (stubbed, templates) = stub_template(wikitext);
+
+        assert_eq!(
+            stubbed,
+            r"`[template:small|text [[Target|label\]\] and \\ path]`"
+        );
+        assert!(templates.is_empty());
+        assert_eq!(
+            StubbedPage {
+                stubbed,
+                template: templates,
+                references: HashMap::new(),
+                links: Vec::new(),
+            }
+            .restub(),
+            wikitext
+        );
+    }
+
+    #[test]
+    fn template_whitelist_supports_case_insensitive_prefix_wildcards() {
+        let (stubbed, templates) = stub_template(
+            "{{lang-en|hello}} {{lang-de|hallo}} {{Lang-en|Hi}} {{other-lang-en|ignored}}",
+        );
+
+        assert_eq!(
+            stubbed,
+            "`[template:lang-en|hello]` `[template:lang-de|hallo]` `[template:Lang-en|Hi]` `[template:other-lang-en#1]`"
+        );
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates.get("other-lang-en#1").map(String::as_str),
+            Some("other-lang-en|ignored")
+        );
     }
 
     #[test]
@@ -350,17 +502,59 @@ mod tests {
     }
 
     #[test]
+    fn wikilink_targets_keep_parenthetical_titles_and_ignore_fragments() {
+        assert_eq!(
+            wikilink_targets(
+                "[[Mercury_(planet)#History|Mercury]] [[Mercury (element)]] [[File:Mercury.jpg|thumb]]"
+            ),
+            ["Mercury_(planet)", "Mercury (element)"]
+        );
+    }
+
+    #[test]
+    fn wikilinks_capture_display_text_and_source_targets_for_the_prompt_table() {
+        assert_eq!(
+            wikilinks("[[Mercury_(planet)#History|Mercury]] [[Mercury (element)]]"),
+            [
+                ("Mercury".to_string(), "Mercury_(planet)".to_string()),
+                (
+                    "Mercury (element)".to_string(),
+                    "Mercury (element)".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn stub_links_replaces_underscored_parenthetical_targets() {
+        let lang_links = [LangLink {
+            english_title: "Mercury (planet)".to_string(),
+            title: "ดาวพุธ".to_string(),
+            lang: "th".to_string(),
+        }];
+
+        assert_eq!(
+            stub_links("[[Mercury_(planet)|Mercury]]", &lang_links),
+            "[Mercury](ดาวพุธ)"
+        );
+        assert_eq!(
+            stub_links("[[Mercury_(planet)#History|Mercury]]", &lang_links),
+            "[Mercury](ดาวพุธ)"
+        );
+    }
+
+    #[test]
     fn stub_links_preserves_file_links_and_their_pipe_options() {
         let wikitext = "{{Infobox|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
         let (without_templates, templates) = stub_template(wikitext);
 
         assert_eq!(
-            templates.get("Infobox").map(String::as_str),
+            templates.get("Infobox#1").map(String::as_str),
             Some("Infobox|image=Soja_texturiert.jpg")
         );
         assert_eq!(
             stub_links(&without_templates, &[]),
-            "`[template:Infobox]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
+            "`[template:Infobox#1]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
         );
     }
 
