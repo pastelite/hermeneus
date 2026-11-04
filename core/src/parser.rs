@@ -3,7 +3,7 @@
 use regex::Regex;
 use std::{collections::HashMap, sync::OnceLock};
 
-use crate::fetcher::LangLink;
+use crate::raw_fetcher::LangLink;
 
 /// Templates with simple bodies can stay inline in the Markdown placeholder
 /// instead of taking an entry in the saved-template map.
@@ -187,7 +187,7 @@ pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
 pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
     let lang_links_map: HashMap<&str, &str> = lang_links
         .iter()
-        .map(|link| (link.english_title.as_str(), link.title.as_str()))
+        .map(|link| (link.page_title.as_str(), link.title.as_str()))
         .collect();
 
     let link = wikilink_regex();
@@ -346,7 +346,7 @@ fn markdown_link_destination(destination: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fetcher::Fetcher;
+    use crate::raw_fetcher::{LangLink, RawFetcher};
     use crate::restub::StubbedPage;
     use std::collections::HashMap;
 
@@ -471,12 +471,12 @@ mod tests {
     fn stub_links_uses_translations_and_keeps_untranslated_targets() {
         let lang_links = [
             LangLink {
-                english_title: "123".to_string(),
+                page_title: "123".to_string(),
                 title: "123Translated".to_string(),
                 lang: "th".to_string(),
             },
             LangLink {
-                english_title: "ABC".to_string(),
+                page_title: "ABC".to_string(),
                 title: "ABCTranslated".to_string(),
                 lang: "th".to_string(),
             },
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn stub_links_replaces_underscored_parenthetical_targets() {
         let lang_links = [LangLink {
-            english_title: "Mercury (planet)".to_string(),
+            page_title: "Mercury (planet)".to_string(),
             title: "ดาวพุธ".to_string(),
             lang: "th".to_string(),
         }];
@@ -589,7 +589,8 @@ mod tests {
 
     #[tokio::test]
     async fn stub_ref_english_page() {
-        let fetcher = Fetcher::new("en").await.unwrap();
+        let client = crate::client::wikipedia_client("en").await.unwrap();
+        let fetcher = RawFetcher::new(client);
         let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
         assert!(!wikitext.is_empty());
         let stubbed = stub_ref(&wikitext);
@@ -598,7 +599,8 @@ mod tests {
 
     #[tokio::test]
     async fn stub_template_english_page_after_ref() {
-        let fetcher = Fetcher::new("en").await.unwrap();
+        let client = crate::client::wikipedia_client("en").await.unwrap();
+        let fetcher = RawFetcher::new(client);
         let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
         assert!(!wikitext.is_empty());
         let stubbed_ref = stub_ref(&wikitext);

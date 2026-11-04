@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+use crate::client::wikipedia_client;
 use crate::parser::{stub_links, stub_ref, stub_template, stub_title, wikilink_targets, wikilinks};
+use crate::raw_fetcher::LangLink;
 use crate::restub::StubbedPage;
 
 /// MediaWiki's maximum number of titles accepted in one `titles` request.
@@ -15,9 +17,7 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub async fn new(lang: &str) -> Result<Self, String> {
-        let url = format!("https://{}.wikipedia.org/w/api.php", lang);
-        let client = Client::builder(&url)
-            .build()
+        let client = wikipedia_client(lang)
             .await
             .map_err(|err| err.to_string())?;
 
@@ -138,7 +138,7 @@ impl Fetcher {
             .await?;
         let links_by_target = links
             .iter()
-            .map(|link| (normalize_title(&link.english_title), link.title.clone()))
+            .map(|link| (normalize_title(&link.page_title), link.title.clone()))
             .collect::<HashMap<_, _>>();
         let link_table = wikilinks(&wikitext)
             .into_iter()
@@ -177,7 +177,7 @@ fn parse_lang_links(response: &Value, requested_titles: &[&str]) -> Result<Vec<L
         let Some(link) = page["langlinks"].as_array().and_then(|links| links.first()) else {
             continue;
         };
-        let english_title = page["title"]
+        let page_title = page["title"]
             .as_str()
             .ok_or_else(|| "MediaWiki page did not contain a title".to_string())?;
         let title = link["title"]
@@ -188,9 +188,9 @@ fn parse_lang_links(response: &Value, requested_titles: &[&str]) -> Result<Vec<L
             .ok_or_else(|| "MediaWiki language link did not contain a language".to_string())?;
 
         links_by_title.insert(
-            normalize_title(english_title),
+            normalize_title(page_title),
             LangLink {
-                english_title: english_title.to_string(),
+                page_title: page_title.to_string(),
                 title: title.to_string(),
                 lang: lang.to_string(),
             },
@@ -244,7 +244,7 @@ fn parse_lang_links(response: &Value, requested_titles: &[&str]) -> Result<Vec<L
 
         if let Some(link) = links_by_title.get(&resolved_title) {
             output.push(LangLink {
-                english_title: requested_title,
+                page_title: requested_title,
                 title: link.title.clone(),
                 lang: link.lang.clone(),
             });
@@ -258,13 +258,6 @@ fn parse_lang_links(response: &Value, requested_titles: &[&str]) -> Result<Vec<L
 pub struct Link {
     pub title: String,
     pub exists: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct LangLink {
-    pub english_title: String,
-    pub title: String,
-    pub lang: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -298,10 +291,10 @@ mod tests {
         let links = parse_lang_links(&response, &["Alias", "Target"]).unwrap();
 
         assert!(links.iter().any(|link| {
-            link.english_title == "Alias" && link.title == "เป้าหมาย" && link.lang == "th"
+            link.page_title == "Alias" && link.title == "เป้าหมาย" && link.lang == "th"
         }));
         assert!(links.iter().any(|link| {
-            link.english_title == "Target" && link.title == "เป้าหมาย" && link.lang == "th"
+            link.page_title == "Target" && link.title == "เป้าหมาย" && link.lang == "th"
         }));
         assert_eq!(stub_links("[[Alias]]", &links), "[Alias](เป้าหมาย)");
     }
@@ -323,7 +316,7 @@ mod tests {
         let links = parse_lang_links(&response, &["copper(II) sulfate"]).unwrap();
 
         assert!(links.iter().any(|link| {
-            link.english_title == "copper(II) sulfate" && link.title == "จุนสี" && link.lang == "th"
+            link.page_title == "copper(II) sulfate" && link.title == "จุนสี" && link.lang == "th"
         }));
         assert_eq!(
             stub_links("[[copper(II) sulfate]]", &links),
@@ -347,11 +340,11 @@ mod tests {
         let canonical_lang_links = fetcher.fetch_lang_links(&["Hello, world"]).await.unwrap();
         let redirected_lang_link = redirected_lang_links
             .iter()
-            .find(|link| link.english_title == "Hello world" && link.lang == "th")
+            .find(|link| link.page_title == "Hello world" && link.lang == "th")
             .expect("redirect alias should use the target page's Thai language link");
         let canonical_lang_link = canonical_lang_links
             .iter()
-            .find(|link| link.english_title == "Hello, world" && link.lang == "th")
+            .find(|link| link.page_title == "Hello, world" && link.lang == "th")
             .expect("canonical page should have a Thai language link");
         assert_eq!(redirected_lang_link.title, canonical_lang_link.title);
     }

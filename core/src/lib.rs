@@ -1,10 +1,14 @@
+pub mod client;
+pub mod error;
 pub mod fetcher;
+pub mod link_table_fetcher;
 pub mod parser;
+pub mod raw_fetcher;
 pub mod restub;
 pub mod translater;
-use mwapi::Client;
 use wasm_bindgen::prelude::*;
 
+use crate::client::wikipedia_client;
 use crate::restub::StubbedPage;
 
 #[wasm_bindgen]
@@ -19,9 +23,7 @@ pub fn test_bindgen() {
 }
 
 async fn fetch_page_response(lang: &str, page: &str) -> Result<String, String> {
-    let url = format!("https://{}.wikipedia.org/w/api.php", lang);
-    let client = Client::builder(&url)
-        .build()
+    let client = wikipedia_client(lang)
         .await
         .map_err(|err| err.to_string())?;
 

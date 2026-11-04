@@ -53,16 +53,39 @@ Keep every fact, number, date, name, and qualifier from the source (e.g. "possib
 
 - Formal or semi-formal and polite, with no slang or spoken register, as in an encyclopedia.
 - Concise and direct: no redundant words (คำฟุ่มเฟือย) and no rhetorical flourishes or wordplay (สำนวนโวหาร/ภาษาวรรณศิลป์).
+- Connectors is really important for normal sounding
 - Plain vocabulary: choose common, modern, standard words over archaic, poetic, or unnecessarily elevated Pali/Sanskrit terms. Do not coin compound terms (ห้ามสมาส-สนธิคำขึ้นเอง).
 - Objective and matter-of-fact, like a serious modern reference book or news report. No fictional or mythological styling.
 
 ## Syntax and connectors
 
-- Use precise formal connectives (ซึ่ง, ที่, โดย, จึง, ดังนี้) to attach clauses to the nouns they modify.
+Thai has no commas or periods between clauses, so readers rely on connecting words to know where one idea ends and the next begins, and how they relate. *This is the most important rule in this section*.
+
+- **Every new fact needs a connector.** When a sentence introduces a new fact, event, date, place, actor, or subject after the previous sentence, it MUST open with a Thai connector. A sentence that starts a new fact with no connector is not allowed, even if the English has a full stop there. Date openers count: write "ในช่วงต้นทศวรรษ 1970" or "ต่อมาในปี 1988", not a bare "ในปี 1988" after an unrelated sentence.
+- Where English uses a comma, a semicolon, a dash, a parenthesis, or a clause that implies a relationship, add an explicit Thai connector. Choose the one that matches the relationship:
+  - Addition or a new point about the same topic: นอกจากนี้, อีกทั้ง, รวมถึง, และ
+  - Relative clause attached to a noun: ซึ่ง, ที่, โดย
+  - Contrast or exception: แต่, อย่างไรก็ตาม, ทั้งนี้, แม้ว่า...แต่
+  - Cause and result: เนื่องจาก, จึง, ดังนั้น, ทำให้, ส่งผลให้
+  - Sequence and time: จากนั้น, ต่อมา, ภายหลัง, ระหว่าง, เมื่อ, ในช่วง
+  - Topic shift or a separate fact: ส่วน, สำหรับ, ในขณะที่
+- Do not join two full clauses with only a space. Do not leave a run of clauses without connectors, and do not leave a sentence as a bare list of noun phrases when the source shows a relationship between them.
+- Do not stack more than two connectors in one sentence. Split the sentence instead.
+- Before output, reread each paragraph and confirm that every sentence after the first has a connector. If one doesn't, add it.
+- Restructure sentences so they read like Thai, but keep the same meaning. Avoid calques such as stacked noun phrases or awkward "ที่ถูก...โดย" constructions.
 - Do not use "ก็" as a linking or filler particle, because it sounds spoken. Use จึง or ได้, or omit it. It is acceptable in fixed expressions where it is grammatically necessary (e.g. "ก็ตาม").
 - Do not translate "it" as มัน.
 - Avoid passive voice (ถูก) unless the action has an adverse or harmful effect on the subject.
 - Split long sentences at natural clause boundaries where it helps readability, but do not over-fragment.
+- If a new fact is a separate topic and a connector would sound forced, you may start a new paragraph instead. Use this only when the source's paragraph break is not already there and the new paragraph still makes sense on its own.
+- Use the function words Thai needs to sound complete, not just the content words. This includes state and location verbs (อยู่, มี, เป็น), aspect and tense markers (แล้ว, ได้, จะ), and classifiers (แห่ง, ชนิด, ตัว, คน, ครอบครัว). If a literal rendering is grammatically correct but reads like a list of nouns or a translation, add the function word that Thai expects. Do not add function words that carry no meaning in the source.
+- Thai has no articles. Do not translate "the" or "a" as นั้น, หนึ่ง, หรือ, or any other word. Drop them and write the noun directly, unless a classifier is grammatically needed (e.g., "ท่าเรือแห่งหนึ่ง" for "a harbor" when the number matters, or "ท่าเรือ" alone otherwise). Use นั้น or นี้ only for an explicit demonstrative in the source ("this", "that").
+
+Example (each new fact connected):
+> Source: The village has a small harbor. Fishing boats leave every morning before dawn. Most of the catch is sold at a market near the pier.
+> Wrong: หมู่บ้านแห่งนี้มีท่าเรือขนาดเล็ก เรือประมงออกทุกเช้าก่อนรุ่งสาง ปลาที่จับได้ส่วนใหญ่ขายที่ตลาดใกล้ท่าเทียบเรือ
+> Correct: หมู่บ้านแห่งนี้มีท่าเรือขนาดเล็กอยู่ โดยเรือประมงจะออกทุกเช้าก่อนรุ่งสาง จากนั้นปลาที่จับได้ส่วนใหญ่จะนำไปขายที่ตลาดใกล้ท่าเทียบเรือนั้น
+
 
 ## Preserve exactly
 
@@ -73,9 +96,20 @@ Copy the following character for character, including backticks:
 
 Keep bold, italics, and list markers as in the source.
 
+## Link explanations
+- Understand link syntax: Markdown links follow [display text](target).
+  - Display text (source text): The visible text readers click on.
+  - Target: The destination the link leads to (usually a page name or URL).
+  - Example: [Mercury](Mercury (element)) — "Mercury" is the display text, and "Mercury (element)" is the target.
+- Translate and transliterate: Match links using their targets, not display text. Use existing Thai page links when available. Otherwise, translate both display text and targets into Thai, including appropriate transliteration of foreign names and terms. Keep scientific terms in English unless a Thai page exists.
+- Preserve and verify links: Never remove links. Keep filenames, category names, and external URLs unchanged. Preserve Markdown syntax, use angle brackets around targets containing spaces or parentheses, and check that no untranslated English targets remain (except permitted scientific terms).
+
 ## Output
 
-Output only the final Thai paragraph, wrapped in a markdown code block. Do not add explanations.
+Output 3 things:
+- <first_draft> wrapped in a markdown code block
+- <issues_found> see the first draft, notice something wrong? something unnatural? anything untranslated (except in exception)? can we rewrite sentence? which one is unclear? did you use hard literary word? did you forgot the connector? go paragraph by paragraph
+- <final_draft> fix the issues that you found and output the final draft, wrapped in a markdown code block
 
 <glossary>
 $1$
