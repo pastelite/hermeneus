@@ -1,11 +1,22 @@
 use std::collections::HashMap;
 
 use mwapi::Client;
+use serde::{Deserialize, Serialize};
 
-use crate::client::wikipedia_client;
 use crate::error::Result;
-use crate::fetcher::LinkTableRow;
-use crate::raw_fetcher::{LangLink, Link, RawFetcher};
+use crate::wiki::client::wikipedia_client;
+use crate::wiki::fetcher::{LangLink, Link, RawFetcher};
+
+/// A row in the glossary link table used when translating a page.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LinkTableRow {
+    /// The link's display text in the source page.
+    pub title: String,
+    /// The source page title the link points to.
+    pub link_to: String,
+    /// The corresponding Thai page title, when one exists.
+    pub translated: Option<String>,
+}
 
 /// Fetches a page and builds a table of its links and Thai-language targets.
 pub struct LinkTableFetcher {
@@ -47,7 +58,7 @@ fn build_langlink_table(links: &[Link], langlinks: &[LangLink]) -> Vec<LinkTable
         .collect::<HashMap<_, _>>();
 
     links
-        .into_iter()
+        .iter()
         .filter(|link| link.namespace == 0)
         .map(|link| LinkTableRow {
             // The raw links API provides target titles, not wikitext display labels.
@@ -68,7 +79,7 @@ fn normalize_title(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{build_langlink_table, LinkTableFetcher};
-    use crate::raw_fetcher::{LangLink, Link};
+    use crate::wiki::fetcher::{LangLink, Link};
 
     #[test]
     fn builds_a_table_for_page_links_and_leaves_untranslated_targets_empty() {

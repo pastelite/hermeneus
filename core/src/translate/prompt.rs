@@ -1,17 +1,6 @@
-use async_openai::{
-    config::OpenAIConfig,
-    types::chat::{
-        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessage,
-        ChatCompletionRequestSystemMessageContent, ChatCompletionRequestUserMessage,
-        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequestArgs,
-    },
-    Client,
-};
-use std::env;
-use wasm_bindgen::prelude::wasm_bindgen;
+use crate::wiki::LinkTableRow;
 
-use crate::fetcher::LinkTableRow;
-const PROMPT: &str = r##"
+pub(super) const PROMPT: &str = r##"
 You are translating English into natural Thai for Thai Wikipedia. Formal encyclopedic register, neutral tone.
 
 ## Inputs
@@ -293,69 +282,10 @@ fn escape_table_cell(value: &str) -> String {
     value.replace('|', "\\|").replace('\n', " ")
 }
 
-#[wasm_bindgen(js_name = get_full_prompt)]
-pub fn get_full_prompt_for_web(
-    original_text: &str,
-    links_json: &str,
-) -> Result<String, wasm_bindgen::JsValue> {
-    let links: Vec<LinkTableRow> = serde_json::from_str(links_json)
-        .map_err(|error| wasm_bindgen::JsValue::from_str(&error.to_string()))?;
-    Ok(get_full_prompt(original_text, &links))
-}
-
-fn messages_for(input: &str) -> Vec<ChatCompletionRequestMessage> {
-    vec![
-        ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-            content: ChatCompletionRequestSystemMessageContent::Text(PROMPT.to_owned()),
-            name: None,
-        }),
-        ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
-            content: ChatCompletionRequestUserMessageContent::Text(input.to_owned()),
-            name: None,
-        }),
-    ]
-}
-
-pub async fn translate_with_openai(input: &str) -> Result<String, String> {
-    // A missing .env file is fine when the variables are provided by the process.
-    let _ = dotenvy::dotenv();
-
-    let api_key = env::var("OPENAI_API_KEY")
-        .map_err(|_| "OPENAI_API_KEY environment variable is not set".to_string())?;
-    let mut config = OpenAIConfig::new().with_api_key(api_key);
-    if let Ok(api_base) = env::var("OPENAI_API_BASE") {
-        config = config.with_api_base(api_base);
-    }
-    let client = Client::with_config(config);
-
-    let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-    let request = CreateChatCompletionRequestArgs::default()
-        .model(model)
-        .messages(messages_for(input))
-        .build()
-        .map_err(|err| err.to_string())?;
-
-    let response = client
-        .chat()
-        .create(request)
-        .await
-        .map_err(|err| err.to_string())?;
-
-    response
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|choice| choice.message.content)
-        .ok_or_else(|| "OpenAI returned an empty translation".to_string())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        get_full_prompt, messages_for, ChatCompletionRequestMessage,
-        ChatCompletionRequestUserMessageContent,
-    };
-    use crate::fetcher::LinkTableRow;
+    use super::get_full_prompt;
+    use crate::wiki::LinkTableRow;
 
     #[test]
     fn full_prompt_includes_link_table_and_original_text_in_their_sections() {
@@ -370,7 +300,7 @@ mod tests {
 
         assert!(prompt.contains("| คำภาษาอังกฤษเดิม | ลิงก์หน้าต้นฉบับ | ลิงก์ภาษาไทย |"));
         assert!(prompt.contains("| Mercury | Mercury (planet) | ดาวพุธ |"));
-        assert!(prompt.contains("ต้นฉบับ:\nSource markdown"));
+        assert!(prompt.contains("<source>\nSource markdown"));
         assert!(!prompt.contains("$1$"));
         assert!(!prompt.contains("$2$"));
     }
@@ -387,21 +317,5 @@ mod tests {
         );
 
         assert!(prompt.contains("| A \\| B | Source |  |"));
-    }
-
-    #[test]
-    fn request_keeps_translation_input_separate_from_instructions() {
-        let messages = messages_for("sample Wikipedia text");
-
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(
-            messages[0],
-            ChatCompletionRequestMessage::System(_)
-        ));
-        assert!(matches!(
-            &messages[1],
-            ChatCompletionRequestMessage::User(message)
-                if message.content == ChatCompletionRequestUserMessageContent::Text("sample Wikipedia text".to_string())
-        ));
     }
 }

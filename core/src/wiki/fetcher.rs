@@ -200,35 +200,44 @@ pub struct LangLink {
 #[cfg(test)]
 mod tests {
     use super::{parse_langlinks, parse_links, RawFetcher};
-    use crate::client::wikipedia_client;
+    use crate::wiki::client::wikipedia_client;
     use serde_json::json;
 
-    #[test]
-    fn parses_only_langlinks_attached_to_the_requested_page_results() {
-        let response = json!({
-            "query": {
-                "pages": [
-                    {
-                        "title": "Flower",
-                        "langlinks": [{ "title": "ดอกไม้", "lang": "th" }]
-                    },
-                    {
-                        "title": "Petal",
-                        "langlinks": [{ "title": "กลีบดอก", "lang": "th" }]
-                    }
-                ]
-            }
-        });
+    #[tokio::test]
+    async fn new_builds_client_for_language() {
+        let client = wikipedia_client("en").await.unwrap();
+        let _fetcher = RawFetcher::new(client);
+    }
 
-        let langlinks = parse_langlinks(&response).unwrap();
+    #[tokio::test]
+    async fn fetch_links_follows_redirects() {
+        let client = wikipedia_client("en").await.unwrap();
+        let fetcher = RawFetcher::new(client);
 
-        assert_eq!(langlinks.len(), 2);
-        assert!(langlinks.iter().any(|link| {
-            link.page_title == "Flower" && link.title == "ดอกไม้" && link.lang == "th"
-        }));
-        assert!(langlinks.iter().any(|link| {
-            link.page_title == "Petal" && link.title == "กลีบดอก" && link.lang == "th"
-        }));
+        let multiple_page_links = fetcher.fetch_links(&["Hello", "World"]).await.unwrap();
+        assert!(multiple_page_links
+            .iter()
+            .any(|link| link.page_title == "Hello"));
+        assert!(multiple_page_links
+            .iter()
+            .any(|link| link.page_title == "World"));
+
+        let redirected_links = fetcher.fetch_links(&["Hello world"]).await.unwrap();
+        let canonical_links = fetcher.fetch_links(&["Hello, world"]).await.unwrap();
+        assert!(!redirected_links.is_empty());
+        assert!(redirected_links
+            .iter()
+            .all(|link| link.page_title == "Hello, world"));
+        assert_eq!(
+            redirected_links
+                .iter()
+                .map(|link| &link.title)
+                .collect::<Vec<_>>(),
+            canonical_links
+                .iter()
+                .map(|link| &link.title)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -271,41 +280,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn new_builds_client_for_language() {
-        let client = wikipedia_client("en").await.unwrap();
-        let _fetcher = RawFetcher::new(client);
+    #[test]
+    fn parse_links_errors_when_the_page_title_is_missing() {
+        let response = json!({
+            "parse": {
+                "links": [{ "ns": 0, "title": "Petal" }]
+            }
+        });
+
+        let error = parse_links(&response).unwrap_err();
+
+        assert_eq!(error.to_string(), "MediaWiki page did not contain a title");
     }
 
     #[tokio::test]
-    async fn fetch_methods_follow_redirects() {
+    async fn fetch_langlinks_follows_redirects() {
         let client = wikipedia_client("en").await.unwrap();
         let fetcher = RawFetcher::new(client);
-
-        let multiple_page_links = fetcher.fetch_links(&["Hello", "World"]).await.unwrap();
-        assert!(multiple_page_links
-            .iter()
-            .any(|link| link.page_title == "Hello"));
-        assert!(multiple_page_links
-            .iter()
-            .any(|link| link.page_title == "World"));
-
-        let redirected_links = fetcher.fetch_links(&["Hello world"]).await.unwrap();
-        let canonical_links = fetcher.fetch_links(&["Hello, world"]).await.unwrap();
-        assert!(!redirected_links.is_empty());
-        assert!(redirected_links
-            .iter()
-            .all(|link| link.page_title == "Hello, world"));
-        assert_eq!(
-            redirected_links
-                .iter()
-                .map(|link| &link.title)
-                .collect::<Vec<_>>(),
-            canonical_links
-                .iter()
-                .map(|link| &link.title)
-                .collect::<Vec<_>>()
-        );
 
         let redirected_langlinks = fetcher.fetch_langlinks(&["Hello world"]).await.unwrap();
         let canonical_langlinks = fetcher.fetch_langlinks(&["Hello, world"]).await.unwrap();
@@ -319,11 +310,56 @@ mod tests {
             .find(|link| link.page_title == "Hello, world" && link.lang == "th")
             .expect("canonical page should have a Thai language link");
         assert_eq!(redirected_langlink.title, canonical_langlink.title);
+    }
 
-        let redirected_wikitext = fetcher.fetch_wikitext("Hello world").await.unwrap();
-        let canonical_wikitext = fetcher.fetch_wikitext("Hello, world").await.unwrap();
-        assert!(!redirected_wikitext.is_empty());
-        assert_eq!(redirected_wikitext, canonical_wikitext);
+    #[test]
+    fn parses_only_langlinks_attached_to_the_requested_page_results() {
+        let response = json!({
+            "query": {
+                "pages": [
+                    {
+                        "title": "Flower",
+                        "langlinks": [{ "title": "ดอกไม้", "lang": "th" }]
+                    },
+                    {
+                        "title": "Petal",
+                        "langlinks": [{ "title": "กลีบดอก", "lang": "th" }]
+                    }
+                ]
+            }
+        });
+
+        let langlinks = parse_langlinks(&response).unwrap();
+
+        assert_eq!(langlinks.len(), 2);
+        assert!(langlinks.iter().any(|link| {
+            link.page_title == "Flower" && link.title == "ดอกไม้" && link.lang == "th"
+        }));
+        assert!(langlinks.iter().any(|link| {
+            link.page_title == "Petal" && link.title == "กลีบดอก" && link.lang == "th"
+        }));
+    }
+
+    #[test]
+    fn parse_langlinks_skips_pages_without_langlinks() {
+        let response = json!({
+            "query": {
+                "pages": [
+                    { "title": "Flower" },
+                    {
+                        "title": "Petal",
+                        "langlinks": [{ "title": "กลีบดอก", "lang": "th" }]
+                    }
+                ]
+            }
+        });
+
+        let langlinks = parse_langlinks(&response).unwrap();
+
+        assert_eq!(langlinks.len(), 1);
+        assert_eq!(langlinks[0].page_title, "Petal");
+        assert_eq!(langlinks[0].title, "กลีบดอก");
+        assert_eq!(langlinks[0].lang, "th");
     }
 
     #[tokio::test]
@@ -339,5 +375,16 @@ mod tests {
         assert!(langlinks
             .iter()
             .any(|link| { link.page_title == "English language" && link.lang == "fr" }));
+    }
+
+    #[tokio::test]
+    async fn fetch_wikitext_follows_redirects() {
+        let client = wikipedia_client("en").await.unwrap();
+        let fetcher = RawFetcher::new(client);
+
+        let redirected_wikitext = fetcher.fetch_wikitext("Hello world").await.unwrap();
+        let canonical_wikitext = fetcher.fetch_wikitext("Hello, world").await.unwrap();
+        assert!(!redirected_wikitext.is_empty());
+        assert_eq!(redirected_wikitext, canonical_wikitext);
     }
 }

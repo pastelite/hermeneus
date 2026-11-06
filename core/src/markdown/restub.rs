@@ -1,41 +1,15 @@
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
     sync::OnceLock,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct StubbedPage {
-    pub stubbed: String,
-    pub template: HashMap<String, String>,
-    pub references: HashMap<String, String>,
-    #[serde(default)]
-    pub links: Vec<crate::fetcher::LinkTableRow>,
-}
-
-impl StubbedPage {
-    /// Serializes this page and all stubbing metadata as JSON.
-    pub fn to_json(&self) -> Result<String, String> {
-        serde_json::to_string(self).map_err(|error| error.to_string())
-    }
-
-    /// Restores a page and its stubbing metadata from JSON.
-    pub fn from_json(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|error| error.to_string())
-    }
-
-    /// Restores the stubbed Markdown-like text to MediaWiki wikitext.
-    pub fn restub(&self) -> String {
-        let wikitext = restub_links(&self.stubbed);
-        let wikitext = restub_references(&wikitext, &self.references);
-        let wikitext = restub_templates(&wikitext, &self.template);
-        restub_title(&wikitext)
-    }
-}
-
-pub fn restub_title(text: &str) -> String {
+/// Converts Markdown headings in `text` back to MediaWiki section headings.
+///
+/// Two or more leading `#` markers become the same number of `=` markers on
+/// both sides, so `## Heading` becomes `== Heading ==`.
+pub(super) fn restub_title(text: &str) -> String {
     static TITLE: OnceLock<Regex> = OnceLock::new();
     let title = TITLE.get_or_init(|| {
         Regex::new(r"(?m)^(?P<marks>#{2,})[ \t]*(?P<title>.*?)$").expect("title regex is valid")
@@ -57,7 +31,11 @@ pub fn restub_title(text: &str) -> String {
         .into_owned()
 }
 
-fn restub_links(wikitext: &str) -> String {
+/// Restores Markdown links in `text` to `[[target]]` or `[[target|label]]`.
+///
+/// Angle-bracketed destinations are unescaped first, and the pipe label is
+/// omitted when it matches the target.
+pub(super) fn restub_links(wikitext: &str) -> String {
     static LINK: OnceLock<Regex> = OnceLock::new();
     let link = LINK.get_or_init(|| {
         Regex::new(r"\[(?P<label>[^\]]*)\]\((?:<(?P<angled>(?:\\.|[^>])*)>|(?P<plain>[^)]*))\)")
@@ -91,6 +69,7 @@ fn restub_links(wikitext: &str) -> String {
     apply_replacements(wikitext.to_string(), replacements)
 }
 
+/// Removes Markdown backslash escapes before ASCII punctuation in a target.
 fn unescape_markdown_destination(destination: &str) -> String {
     let mut characters = destination.chars().peekable();
     let mut output = String::new();
@@ -110,7 +89,12 @@ fn unescape_markdown_destination(destination: &str) -> String {
     output
 }
 
-fn restub_references(wikitext: &str, references: &HashMap<String, String>) -> String {
+/// Replaces `[^key]` markers in `text` with MediaWiki `<ref>` tags.
+///
+/// Digit-only keys become unnamed refs. Named refs use one full definition and
+/// self-closing tags for later uses, and an empty saved body produces a
+/// self-closing ref. Markers without a saved value are left untouched.
+pub(super) fn restub_references(wikitext: &str, references: &HashMap<String, String>) -> String {
     static REFERENCE: OnceLock<Regex> = OnceLock::new();
     let reference = REFERENCE
         .get_or_init(|| Regex::new(r"\[\^(?P<key>[^\]]+)\]").expect("reference regex is valid"));
@@ -146,7 +130,12 @@ fn restub_references(wikitext: &str, references: &HashMap<String, String>) -> St
     apply_replacements(wikitext.to_string(), replacements)
 }
 
-fn restub_templates(wikitext: &str, templates: &HashMap<String, String>) -> String {
+/// Restores backtick-quoted `` `[template:...]` `` placeholders to wikitext.
+///
+/// A placeholder body that is a saved `name#n` key is looked up in `templates`.
+/// Whitelisted templates keep their arguments in the placeholder itself, so
+/// they are restored directly. Unknown `name#n` keys are left untouched.
+pub(super) fn restub_templates(wikitext: &str, templates: &HashMap<String, String>) -> String {
     const PREFIX: &str = "`[template:";
     let mut replacements = Vec::new();
     let mut search_from = 0;
@@ -192,6 +181,10 @@ fn restub_templates(wikitext: &str, templates: &HashMap<String, String>) -> Stri
     apply_replacements(wikitext.to_string(), replacements)
 }
 
+/// Returns whether `template` looks like a saved `name#n` template map key.
+///
+/// Keys containing arguments (`name|arg`) are inline templates rather than map
+/// keys, and the part after `#` must be a non-empty number.
 fn is_template_map_key(template: &str) -> bool {
     if template.contains('|') {
         return false;
@@ -202,6 +195,7 @@ fn is_template_map_key(template: &str) -> bool {
     !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
 }
 
+/// Removes backslash escapes for `\` and `]` inside a template placeholder.
 fn unescape_template_token(template: &str) -> String {
     let mut characters = template.chars().peekable();
     let mut output = String::new();
@@ -221,6 +215,8 @@ fn unescape_template_token(template: &str) -> String {
     output
 }
 
+/// Applies `replacements` from the end of `text` so earlier byte ranges remain
+/// valid as the string is rewritten.
 fn apply_replacements(mut text: String, replacements: Vec<(Range<usize>, String)>) -> String {
     for (range, replacement) in replacements.into_iter().rev() {
         text.replace_range(range, &replacement);
@@ -230,7 +226,7 @@ fn apply_replacements(mut text: String, replacements: Vec<(Range<usize>, String)
 
 #[cfg(test)]
 mod tests {
-    use super::{restub_title, StubbedPage};
+    use super::*;
     use std::collections::HashMap;
 
     #[test]
@@ -242,77 +238,65 @@ mod tests {
     }
 
     #[test]
-    fn restubs_links_references_and_templates() {
-        let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] [^2] `[template:Infobox#1]`".to_string(),
-            template: HashMap::from([(
-                "Infobox#1".to_string(),
-                "Infobox|name=Example".to_string(),
-            )]),
-            references: HashMap::from([
-                ("source".to_string(), "Citation".to_string()),
-                ("2".to_string(), "Unnamed citation".to_string()),
-            ]),
-            links: Vec::new(),
-        };
-
+    fn restub_links_restores_markdown_links() {
         assert_eq!(
-            page.restub(),
-            "[[ABCTranslated|ABC]] <ref name=\"source\">Citation</ref> <ref>Unnamed citation</ref> {{Infobox|name=Example}}"
+            restub_links("[ABC](ABCTranslated) [Plain](Plain) [โดเมน](<โดเมน (ชีววิทยา)>)"),
+            "[[ABCTranslated|ABC]] [[Plain]] [[โดเมน (ชีววิทยา)|โดเมน]]"
         );
     }
 
     #[test]
-    fn restubs_parenthesized_thai_markdown_target() {
-        let page = StubbedPage {
-            stubbed: "[โดเมน](<โดเมน (ชีววิทยา)>)".to_string(),
-            template: HashMap::new(),
-            references: HashMap::new(),
-            links: Vec::new(),
-        };
-
-        assert_eq!(page.restub(), "[[โดเมน (ชีววิทยา)|โดเมน]]");
+    fn unescape_markdown_destination_removes_backslash_escapes() {
+        assert_eq!(unescape_markdown_destination(r"a\\b\<c\>"), r"a\b<c>");
     }
 
     #[test]
-    fn restubs_repeated_named_references_with_one_definition() {
-        let page = StubbedPage {
-            stubbed: "[^source] and [^source]".to_string(),
-            template: HashMap::new(),
-            references: HashMap::from([("source".to_string(), "Citation".to_string())]),
-            links: Vec::new(),
-        };
+    fn restub_references_restores_numbered_and_named_refs() {
+        let references = HashMap::from([
+            ("source".to_string(), "Citation".to_string()),
+            ("2".to_string(), "Unnamed citation".to_string()),
+            ("empty".to_string(), String::new()),
+        ]);
 
         assert_eq!(
-            page.restub(),
-            "<ref name=\"source\">Citation</ref> and <ref name=\"source\" />"
+            restub_references("[^source] [^source] [^2] [^empty] [^missing]", &references),
+            "<ref name=\"source\">Citation</ref> <ref name=\"source\" /> <ref>Unnamed citation</ref> <ref name=\"empty\" /> [^missing]"
         );
     }
 
     #[test]
-    fn stubbed_page_json_round_trip_preserves_restub_data() {
-        let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox#1]`".to_string(),
-            template: HashMap::from([(
-                "Infobox#1".to_string(),
-                "Infobox|name=Example".to_string(),
-            )]),
-            references: HashMap::from([("source".to_string(), "Citation".to_string())]),
-            links: vec![crate::fetcher::LinkTableRow {
-                title: "ABC".to_string(),
-                link_to: "ABC".to_string(),
-                translated: Some("ABCTranslated".to_string()),
-            }],
-        };
+    fn restub_templates_restores_saved_and_inline_templates() {
+        let templates =
+            HashMap::from([("Infobox#1".to_string(), "Infobox|name=Example".to_string())]);
 
-        let serialized = page.to_json().unwrap();
-        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 4);
-        assert_eq!(value["links"][0]["link_to"], "ABC");
-        assert!(value.get("title").is_none());
+        assert_eq!(
+            restub_templates(
+                "`[template:Infobox#1]` `[template:small|text]` `[template:Unknown#1]`",
+                &templates,
+            ),
+            "{{Infobox|name=Example}} {{small|text}} `[template:Unknown#1]`"
+        );
+    }
 
-        let restored = StubbedPage::from_json(&serialized).unwrap();
+    #[test]
+    fn is_template_map_key_requires_a_numeric_suffix_and_no_arguments() {
+        assert!(is_template_map_key("Infobox#1"));
+        assert!(is_template_map_key("small#12"));
+        assert!(!is_template_map_key("Infobox|name=Example#1"));
+        assert!(!is_template_map_key("Infobox"));
+        assert!(!is_template_map_key("Infobox#"));
+        assert!(!is_template_map_key("Infobox#x"));
+    }
 
-        assert_eq!(restored.restub(), page.restub());
+    #[test]
+    fn unescape_template_token_removes_backslash_escapes() {
+        assert_eq!(unescape_template_token(r"a\\b\]c"), r"a\b]c");
+    }
+
+    #[test]
+    fn apply_replacements_replaces_all_ranges() {
+        let replacements = vec![(0..1, "A".to_string()), (2..3, "C".to_string())];
+
+        assert_eq!(apply_replacements("abc".to_string(), replacements), "AbC");
     }
 }

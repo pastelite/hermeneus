@@ -1,9 +1,5 @@
-// pub fn parse_wikitext_links(wikitext: &str, skip)
-
 use regex::Regex;
 use std::{collections::HashMap, sync::OnceLock};
-
-use crate::raw_fetcher::LangLink;
 
 /// Templates with simple bodies can stay inline in the Markdown placeholder
 /// instead of taking an entry in the saved-template map.
@@ -20,10 +16,23 @@ pub const TEMPLATE_WHITELIST: &[&str] = &[
     "langx",
 ];
 
+/// Replaces MediaWiki template invocations in `wikitext` with placeholder tokens.
+///
+/// Templates in [`TEMPLATE_WHITELIST`] stay inline as
+/// `` `[template:name|args]` ``. Every other template is stored in the returned
+/// map under a `name#n` key and replaced with `` `[template:name#n]` ``, where
+/// `n` distinguishes repeated uses of the same template name.
 pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
     stub_template_with_whitelist(wikitext, TEMPLATE_WHITELIST)
 }
 
+/// Replaces templates in `wikitext` like [`stub_template`], using `whitelist`
+/// to decide which templates stay inline.
+///
+/// Each whitelist pattern is matched case-insensitively against the template
+/// name with any `Template:` prefix removed. A pattern ending in `*` matches
+/// every template whose name starts with the text before the `*`. Templates
+/// that do not match are stored in the returned map under a `name#n` key.
 pub fn stub_template_with_whitelist(
     wikitext: &str,
     whitelist: &[&str],
@@ -101,10 +110,15 @@ pub fn stub_template_with_whitelist(
     (output, table)
 }
 
+/// Escapes characters that would otherwise terminate a template placeholder.
 fn escape_template_token(template: &str) -> String {
     template.replace('\\', "\\\\").replace(']', "\\]")
 }
 
+/// Returns whether a whitelist `pattern` matches `template_name`.
+///
+/// Matching is case-insensitive. A trailing `*` turns the pattern into a
+/// prefix match, so `lang-*` matches `lang-en` and `Lang-de`.
 fn template_name_matches(pattern: &str, template_name: &str) -> bool {
     let Some(prefix) = pattern.strip_suffix('*') else {
         return pattern.eq_ignore_ascii_case(template_name);
@@ -114,6 +128,12 @@ fn template_name_matches(pattern: &str, template_name: &str) -> bool {
         .is_some_and(|name_prefix| name_prefix.eq_ignore_ascii_case(prefix))
 }
 
+/// Replaces `<ref>` tags in `wikitext` with Markdown footnote markers.
+///
+/// A named ref such as `<ref name="source">Citation</ref>` reuses the same key
+/// every time it appears, and a self-closing named ref inherits the body from a
+/// later definition. Unnamed refs are numbered in order of appearance. Returns
+/// the rewritten text and a map from footnote key to citation body.
 pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
     // Matches paired refs like `<ref>citation</ref>` and self-closing refs
     // like `<ref name="source" />`. It captures the opening-tag attributes
@@ -184,12 +204,13 @@ pub fn stub_ref(wikitext: &str) -> (String, HashMap<String, String>) {
     (output, references)
 }
 
-pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
-    let lang_links_map: HashMap<&str, &str> = lang_links
-        .iter()
-        .map(|link| (link.page_title.as_str(), link.title.as_str()))
-        .collect();
-
+/// Converts `[[target|label]]` wikilinks in `wikitext` to Markdown links.
+///
+/// Link targets are preserved as written, including section fragments. File,
+/// image, and category links are left as wikitext, and destinations containing
+/// spaces, parentheses, angle brackets, or backslashes are wrapped in angle
+/// brackets.
+pub fn stub_links(wikitext: &str) -> String {
     let link = wikilink_regex();
 
     let mut replacements = Vec::new();
@@ -218,17 +239,9 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
             .name("label")
             .map_or(target, |capture| capture.as_str().trim());
 
-        // MediaWiki treats underscores and spaces equivalently in page titles.
-        let page_target = target.split_once('#').map_or(target, |(title, _)| title);
-        let lookup_title = page_target.replace('_', " ");
-        let destination = lang_links_map
-            .get(lookup_title.as_str())
-            .copied()
-            .unwrap_or(target);
-
         replacements.push((
             whole_link.start()..whole_link.end(),
-            format!("[{label}]({})", markdown_link_destination(destination)),
+            format!("[{label}]({})", markdown_link_destination(target)),
         ));
     }
 
@@ -240,53 +253,7 @@ pub fn stub_links(wikitext: &str, lang_links: &[LangLink]) -> String {
     output
 }
 
-/// Return page-link targets as they appear in the source wikitext. MediaWiki's
-/// parsed links API canonicalizes titles (and follows some redirects), which
-/// can otherwise leave the stubbing step without a langlink keyed by the
-/// original target spelling.
-pub fn wikilink_targets(wikitext: &str) -> Vec<String> {
-    wikilinks(wikitext)
-        .into_iter()
-        .map(|(_, target)| target)
-        .collect()
-}
-
-/// Return each article link's displayed text and page target, excluding
-/// non-article namespaces and section fragments from the target.
-pub fn wikilinks(wikitext: &str) -> Vec<(String, String)> {
-    wikilink_regex()
-        .captures_iter(wikitext)
-        .filter_map(|captures| {
-            let original_target = captures.name("target")?.as_str().trim();
-            if original_target
-                .split_once(':')
-                .is_some_and(|(namespace, _)| {
-                    namespace.eq_ignore_ascii_case("file")
-                        || namespace.eq_ignore_ascii_case("image")
-                        || namespace.eq_ignore_ascii_case("category")
-                })
-            {
-                return None;
-            }
-
-            // A fragment identifies a section, not a separate Wikipedia page.
-            let target = original_target
-                .split_once('#')
-                .map_or(original_target, |(title, _)| title)
-                .trim();
-            if target.is_empty() {
-                return None;
-            }
-
-            let label = captures
-                .name("label")
-                .map(|label| label.as_str().trim())
-                .unwrap_or(original_target);
-            Some((label.to_string(), target.to_string()))
-        })
-        .collect()
-}
-
+/// Returns the shared regex that matches `[[target]]` and `[[target|label]]`.
 fn wikilink_regex() -> &'static Regex {
     static LINK: OnceLock<Regex> = OnceLock::new();
     LINK.get_or_init(|| {
@@ -295,6 +262,11 @@ fn wikilink_regex() -> &'static Regex {
     })
 }
 
+/// Converts MediaWiki section headings in `wikitext` to Markdown headings.
+///
+/// Each pair of `=` markers becomes one `#`, so `== Heading ==` becomes
+/// `## Heading`. Headings whose opening and closing marker counts differ are
+/// left unchanged.
 pub fn stub_title(wikitext: &str) -> String {
     static TITLE: OnceLock<Regex> = OnceLock::new();
     let title = TITLE.get_or_init(|| {
@@ -329,6 +301,8 @@ pub fn stub_title(wikitext: &str) -> String {
         .into_owned()
 }
 
+/// Formats `destination` for a Markdown link, wrapping it in angle brackets
+/// when it contains whitespace or characters that would end the link early.
 fn markdown_link_destination(destination: &str) -> String {
     if destination.chars().any(|character| {
         character.is_whitespace() || matches!(character, '(' | ')' | '<' | '>' | '\\')
@@ -346,32 +320,9 @@ fn markdown_link_destination(destination: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::raw_fetcher::{LangLink, RawFetcher};
-    use crate::restub::StubbedPage;
+    use crate::markdown::StubbedPage;
+    use crate::wiki::RawFetcher;
     use std::collections::HashMap;
-
-    #[test]
-    fn stub_title_converts_wikitext_heading_levels_to_markdown() {
-        assert_eq!(
-            stub_title("==test==\n=== abc ===\n==== def ====\n===== ghi =====\n====== jkl ======"),
-            "## test\n### abc\n#### def\n##### ghi\n###### jkl"
-        );
-        assert_eq!(stub_title("== mismatched ==="), "== mismatched ===");
-    }
-
-    #[test]
-    fn stub_and_restub_title_round_trip() {
-        let wikitext = "Before\n== test ==\n=== abc ===\n==== def ====\nAfter";
-        let page = StubbedPage {
-            stubbed: stub_title(wikitext),
-            template: HashMap::new(),
-            references: HashMap::new(),
-            links: Vec::new(),
-        };
-
-        assert_eq!(page.stubbed, "Before\n## test\n### abc\n#### def\nAfter");
-        assert_eq!(page.restub(), wikitext);
-    }
 
     #[test]
     fn stub_template_keeps_nested_templates_until_the_outer_template_closes() {
@@ -405,7 +356,6 @@ mod tests {
             stubbed,
             template: templates,
             references: HashMap::new(),
-            links: Vec::new(),
         };
 
         assert_eq!(
@@ -443,7 +393,6 @@ mod tests {
                 stubbed,
                 template: templates,
                 references: HashMap::new(),
-                links: Vec::new(),
             }
             .restub(),
             wikitext
@@ -467,95 +416,41 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stub_template_english_page_after_ref() {
+        let client = crate::wiki::wikipedia_client("en").await.unwrap();
+        let fetcher = RawFetcher::new(client);
+        let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
+        assert!(!wikitext.is_empty());
+        let stubbed_ref = stub_ref(&wikitext);
+        let stubbed = stub_template(&stubbed_ref.0);
+        println!("{:#?}", stubbed);
+    }
+
     #[test]
-    fn stub_links_uses_translations_and_keeps_untranslated_targets() {
-        let lang_links = [
-            LangLink {
-                page_title: "123".to_string(),
-                title: "123Translated".to_string(),
-                lang: "th".to_string(),
-            },
-            LangLink {
-                page_title: "ABC".to_string(),
-                title: "ABCTranslated".to_string(),
-                lang: "th".to_string(),
-            },
-        ];
+    fn stub_template_with_whitelist_uses_the_supplied_whitelist() {
+        let (stubbed, templates) =
+            stub_template_with_whitelist("{{keep|one}} {{store|two}}", &["keep"]);
 
-        let output = stub_links(
-            "[[123|ABC]] [[ABC]] [[Missing|Shown]] [[Plain]]",
-            &lang_links,
-        );
-
+        assert_eq!(stubbed, "`[template:keep|one]` `[template:store#1]`");
         assert_eq!(
-            output,
-            "[ABC](123Translated) [ABC](ABCTranslated) [Shown](Missing) [Plain](Plain)"
+            templates.get("store#1").map(String::as_str),
+            Some("store|two")
         );
     }
 
     #[test]
-    fn stub_links_angle_brackets_destinations_with_spaces_or_parentheses() {
-        assert_eq!(
-            stub_links("[[ABC (link)|Stuff]] [[Some page]]", &[]),
-            "[Stuff](<ABC (link)>) [Some page](<Some page>)"
-        );
+    fn escape_template_token_escapes_backslashes_and_closing_brackets() {
+        assert_eq!(escape_template_token(r"a\b]c"), r"a\\b\]c");
     }
 
     #[test]
-    fn wikilink_targets_keep_parenthetical_titles_and_ignore_fragments() {
-        assert_eq!(
-            wikilink_targets(
-                "[[Mercury_(planet)#History|Mercury]] [[Mercury (element)]] [[File:Mercury.jpg|thumb]]"
-            ),
-            ["Mercury_(planet)", "Mercury (element)"]
-        );
-    }
-
-    #[test]
-    fn wikilinks_capture_display_text_and_source_targets_for_the_prompt_table() {
-        assert_eq!(
-            wikilinks("[[Mercury_(planet)#History|Mercury]] [[Mercury (element)]]"),
-            [
-                ("Mercury".to_string(), "Mercury_(planet)".to_string()),
-                (
-                    "Mercury (element)".to_string(),
-                    "Mercury (element)".to_string()
-                ),
-            ]
-        );
-    }
-
-    #[test]
-    fn stub_links_replaces_underscored_parenthetical_targets() {
-        let lang_links = [LangLink {
-            page_title: "Mercury (planet)".to_string(),
-            title: "ดาวพุธ".to_string(),
-            lang: "th".to_string(),
-        }];
-
-        assert_eq!(
-            stub_links("[[Mercury_(planet)|Mercury]]", &lang_links),
-            "[Mercury](ดาวพุธ)"
-        );
-        assert_eq!(
-            stub_links("[[Mercury_(planet)#History|Mercury]]", &lang_links),
-            "[Mercury](ดาวพุธ)"
-        );
-    }
-
-    #[test]
-    fn stub_links_preserves_file_links_and_their_pipe_options() {
-        let wikitext = "{{Infobox|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
-        let (without_templates, templates) = stub_template(wikitext);
-
-        assert_eq!(
-            templates.get("Infobox#1").map(String::as_str),
-            Some("Infobox|image=Soja_texturiert.jpg")
-        );
-        assert_eq!(
-            stub_links(&without_templates, &[]),
-            "`[template:Infobox#1]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
-        );
+    fn template_name_matches_supports_exact_names_and_prefix_wildcards() {
+        assert!(template_name_matches("small", "Small"));
+        assert!(!template_name_matches("small", "smaller"));
+        assert!(template_name_matches("lang-*", "lang-en"));
+        assert!(template_name_matches("lang-*", "Lang-de"));
+        assert!(!template_name_matches("lang-*", "other-lang-en"));
     }
 
     #[test]
@@ -589,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_ref_english_page() {
-        let client = crate::client::wikipedia_client("en").await.unwrap();
+        let client = crate::wiki::wikipedia_client("en").await.unwrap();
         let fetcher = RawFetcher::new(client);
         let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
         assert!(!wikitext.is_empty());
@@ -597,14 +492,83 @@ mod tests {
         println!("{:#?}", stubbed);
     }
 
-    #[tokio::test]
-    async fn stub_template_english_page_after_ref() {
-        let client = crate::client::wikipedia_client("en").await.unwrap();
-        let fetcher = RawFetcher::new(client);
-        let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
-        assert!(!wikitext.is_empty());
-        let stubbed_ref = stub_ref(&wikitext);
-        let stubbed = stub_template(&stubbed_ref.0);
-        println!("{:#?}", stubbed);
+    #[test]
+    fn stub_links_converts_wikilinks_without_translating_targets() {
+        assert_eq!(
+            stub_links("[[123|ABC]] [[ABC]] [[Missing|Shown]] [[Plain]]"),
+            "[ABC](123) [ABC](ABC) [Shown](Missing) [Plain](Plain)"
+        );
+    }
+
+    #[test]
+    fn stub_links_angle_brackets_destinations_with_spaces_or_parentheses() {
+        assert_eq!(
+            stub_links("[[ABC (link)|Stuff]] [[Some page]]"),
+            "[Stuff](<ABC (link)>) [Some page](<Some page>)"
+        );
+    }
+
+    #[test]
+    fn stub_links_preserves_underscored_parenthetical_targets() {
+        assert_eq!(
+            stub_links("[[Mercury_(planet)|Mercury]]"),
+            "[Mercury](<Mercury_(planet)>)"
+        );
+        assert_eq!(
+            stub_links("[[Mercury_(planet)#History|Mercury]]"),
+            "[Mercury](<Mercury_(planet)#History>)"
+        );
+    }
+
+    #[test]
+    fn stub_links_preserves_file_links_and_their_pipe_options() {
+        let wikitext = "{{Infobox|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
+        let (without_templates, templates) = stub_template(wikitext);
+
+        assert_eq!(
+            templates.get("Infobox#1").map(String::as_str),
+            Some("Infobox|image=Soja_texturiert.jpg")
+        );
+        assert_eq!(
+            stub_links(&without_templates),
+            "`[template:Infobox#1]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
+        );
+    }
+
+    #[test]
+    fn wikilink_regex_captures_target_and_optional_label() {
+        let captures = wikilink_regex().captures("[[Target|Label]]").unwrap();
+
+        assert_eq!(&captures["target"], "Target");
+        assert_eq!(&captures["label"], "Label");
+    }
+
+    #[test]
+    fn stub_title_converts_wikitext_heading_levels_to_markdown() {
+        assert_eq!(
+            stub_title("==test==\n=== abc ===\n==== def ====\n===== ghi =====\n====== jkl ======"),
+            "## test\n### abc\n#### def\n##### ghi\n###### jkl"
+        );
+        assert_eq!(stub_title("== mismatched ==="), "== mismatched ===");
+    }
+
+    #[test]
+    fn stub_and_restub_title_round_trip() {
+        let wikitext = "Before\n== test ==\n=== abc ===\n==== def ====\nAfter";
+        let page = StubbedPage {
+            stubbed: stub_title(wikitext),
+            template: HashMap::new(),
+            references: HashMap::new(),
+        };
+
+        assert_eq!(page.stubbed, "Before\n## test\n### abc\n#### def\nAfter");
+        assert_eq!(page.restub(), wikitext);
+    }
+
+    #[test]
+    fn markdown_link_destination_angle_brackets_destinations_when_needed() {
+        assert_eq!(markdown_link_destination("Plain"), "Plain");
+        assert_eq!(markdown_link_destination("ABC (link)"), "<ABC (link)>");
+        assert_eq!(markdown_link_destination(r"a\b"), r"<a\\b>");
     }
 }
