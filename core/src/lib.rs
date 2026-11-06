@@ -10,8 +10,10 @@ use serde::Serialize;
 
 pub use crate::error::Error;
 pub use crate::markdown::StubbedPage;
-pub use crate::translate::{get_full_prompt, translate_with_openai};
-pub use crate::wiki::{LinkTableFetcher, LinkTableRow, RawFetcher, StubbedPageFetcher};
+pub use crate::translate::translate_with_openai;
+pub use crate::wiki::{
+    glossary_markdown, LinkTableFetcher, LinkTableRow, RawFetcher, StubbedPageFetcher,
+};
 
 use crate::wiki::wikipedia_client;
 

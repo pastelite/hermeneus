@@ -8,4 +8,4 @@ Not currently close but okay I guess
 - [x] Convert to markdown and convert back (note: still some bug)
 - [x] Decent Prompt (not perfect, but decent yes)
 - [] The ability to select specific section to translate
-- [] Can update prompt in the UI
+- [x] Can update prompt in the UI

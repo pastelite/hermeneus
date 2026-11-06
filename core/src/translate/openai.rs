@@ -9,13 +9,11 @@ use async_openai::{
 };
 use std::env;
 
-use super::prompt::PROMPT;
-
 /// Builds the system and user messages sent to the translation model.
-fn messages_for(input: &str) -> Vec<ChatCompletionRequestMessage> {
+fn messages_for(prompt: &str, input: &str) -> Vec<ChatCompletionRequestMessage> {
     vec![
         ChatCompletionRequestMessage::System(ChatCompletionRequestSystemMessage {
-            content: ChatCompletionRequestSystemMessageContent::Text(PROMPT.to_owned()),
+            content: ChatCompletionRequestSystemMessageContent::Text(prompt.to_owned()),
             name: None,
         }),
         ChatCompletionRequestMessage::User(ChatCompletionRequestUserMessage {
@@ -25,8 +23,9 @@ fn messages_for(input: &str) -> Vec<ChatCompletionRequestMessage> {
     ]
 }
 
-/// Translates `input` with the OpenAI chat completion API.
-pub async fn translate_with_openai(input: &str) -> Result<String, String> {
+/// Translates `input` with the OpenAI chat completion API using `prompt` as the
+/// system message.
+pub async fn translate_with_openai(prompt: &str, input: &str) -> Result<String, String> {
     // A missing .env file is fine when the variables are provided by the process.
     let _ = dotenvy::dotenv();
 
@@ -41,7 +40,7 @@ pub async fn translate_with_openai(input: &str) -> Result<String, String> {
     let model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
     let request = CreateChatCompletionRequestArgs::default()
         .model(model)
-        .messages(messages_for(input))
+        .messages(messages_for(prompt, input))
         .build()
         .map_err(|err| err.to_string())?;
 
@@ -67,7 +66,7 @@ mod tests {
 
     #[test]
     fn request_keeps_translation_input_separate_from_instructions() {
-        let messages = messages_for("sample Wikipedia text");
+        let messages = messages_for("Translate this", "sample Wikipedia text");
 
         assert_eq!(messages.len(), 2);
         assert!(matches!(

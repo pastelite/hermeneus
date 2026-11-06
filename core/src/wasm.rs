@@ -1,7 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use crate::translate::get_full_prompt;
-use crate::wiki::LinkTableRow;
+use crate::wiki::{glossary_markdown, LinkTableRow};
 use crate::{fetch_page_response, fetch_stubbed_page_json, restub_page_json};
 
 #[wasm_bindgen]
@@ -37,10 +36,11 @@ pub fn restub_page(stubbed_page_json: &str) -> Result<String, JsValue> {
     restub_page_json(stubbed_page_json).map_err(|error| JsValue::from_str(&error))
 }
 
-/// Builds the full translation prompt from Markdown and a glossary JSON array.
-#[wasm_bindgen(js_name = get_full_prompt)]
-pub fn get_full_prompt_for_web(original_text: &str, links_json: &str) -> Result<String, JsValue> {
+/// Formats a glossary JSON array as the Markdown table used in translation
+/// prompts.
+#[wasm_bindgen]
+pub fn get_glossary(links_json: &str) -> Result<String, JsValue> {
     let links: Vec<LinkTableRow> =
         serde_json::from_str(links_json).map_err(|error| JsValue::from_str(&error.to_string()))?;
-    Ok(get_full_prompt(original_text, &links))
+    Ok(glossary_markdown(&links))
 }

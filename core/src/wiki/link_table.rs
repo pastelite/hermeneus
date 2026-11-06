@@ -51,6 +51,29 @@ impl LinkTableFetcher {
     }
 }
 
+/// Formats `links` as the Markdown glossary table inserted into a translation
+/// prompt.
+pub fn glossary_markdown(links: &[LinkTableRow]) -> String {
+    let mut table =
+        String::from("| คำภาษาอังกฤษเดิม | ลิงก์หน้าต้นฉบับ | ลิงก์ภาษาไทย |\n| --- | --- | --- |");
+
+    for link in links {
+        let translated = link.translated.as_deref().unwrap_or_default();
+        table.push_str(&format!(
+            "\n| {} | {} | {} |",
+            escape_table_cell(&link.title),
+            escape_table_cell(&link.link_to),
+            escape_table_cell(translated),
+        ));
+    }
+
+    table
+}
+
+fn escape_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
 fn build_langlink_table(links: &[Link], langlinks: &[LangLink]) -> Vec<LinkTableRow> {
     let translated_by_title = langlinks
         .iter()
@@ -78,8 +101,9 @@ fn normalize_title(title: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_langlink_table, LinkTableFetcher};
+    use super::{build_langlink_table, glossary_markdown, LinkTableFetcher};
     use crate::wiki::fetcher::{LangLink, Link};
+    use crate::wiki::LinkTableRow;
 
     #[test]
     fn builds_a_table_for_page_links_and_leaves_untranslated_targets_empty() {
@@ -119,6 +143,29 @@ mod tests {
         assert_eq!(table[1].title, "Petal");
         assert_eq!(table[1].link_to, "Petal");
         assert_eq!(table[1].translated, None);
+    }
+
+    #[test]
+    fn glossary_markdown_includes_link_table_rows() {
+        let glossary = glossary_markdown(&[LinkTableRow {
+            title: "Mercury".to_string(),
+            link_to: "Mercury (planet)".to_string(),
+            translated: Some("ดาวพุธ".to_string()),
+        }]);
+
+        assert!(glossary.contains("| คำภาษาอังกฤษเดิม | ลิงก์หน้าต้นฉบับ | ลิงก์ภาษาไทย |"));
+        assert!(glossary.contains("| Mercury | Mercury (planet) | ดาวพุธ |"));
+    }
+
+    #[test]
+    fn glossary_markdown_escapes_table_delimiters() {
+        let glossary = glossary_markdown(&[LinkTableRow {
+            title: "A | B".to_string(),
+            link_to: "Source".to_string(),
+            translated: None,
+        }]);
+
+        assert!(glossary.contains("| A \\| B | Source |  |"));
     }
 
     #[tokio::test]
