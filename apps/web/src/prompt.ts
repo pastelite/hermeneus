@@ -70,7 +70,14 @@ Keep bold, italics, and list markers as in the source.
 
 Output 3 things:
 - <first_draft> wrapped in a markdown code block
-- <issues_found> see the first draft, notice something wrong? something unnatural? anything untranslated (except in exception)? can we rewrite sentence? which one is unclear? did you use hard literary word? did you forgot the connector? go paragraph by paragraph
+- <issues_found> see the first draft and check these:
+  - notice something wrong? something unnatural? 
+  - any link target still english untranslated (except in exception)?
+  - did transliteration still preserve original English word in a bracket?
+  - are the transliteration bracket got confused as the link target bracket?
+  - can we rewrite sentence? which one is unclear?
+  - did you use hard literary word? 
+  - did you forgot the connector?
 - <final_draft> fix the issues that you found and output the final draft, wrapped in a markdown code block
 
 <glossary>
