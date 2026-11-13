@@ -1,6 +1,7 @@
 mod restub;
 mod stub;
 mod stubbed_page;
+mod template_new;
 
 pub use stubbed_page::StubbedPage;
 

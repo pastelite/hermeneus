@@ -14,6 +14,10 @@ pub const TEMPLATE_WHITELIST: &[&str] = &[
     "convert",
     "lang-*",
     "langx",
+    "korean",
+    "nihongo",
+    "transliteration",
+    "infobox*", // test might not work well but let's try
 ];
 
 /// Replaces MediaWiki template invocations in `wikitext` with placeholder tokens.
