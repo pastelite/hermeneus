@@ -367,14 +367,28 @@ pub fn restub_template_with_whitelist_xml(
                 // start with `<`, so we leave it alone.
                 if name == "params" {
                     if let Some(key) = attribute_value(&event, b"key") {
-                        // direct params of a `<template-m>` go on their own line
-                        if matches!(open_templates.last(), Some(TemplateStart::Multiline)) {
+                        // direct params of a `<template-m>` go on their own line,
+                        // with keys padded so the `=` signs line up
+                        if let Some(TemplateStart::Multiline { key_width }) =
+                            open_templates.last().copied()
+                        {
                             output.push('\n');
-                        }
-                        output.push('|');
-                        if !is_positional_param(&key) {
-                            output.push_str(&key);
-                            output.push('=');
+                            output.push('|');
+                            if is_positional_param(&key) {
+                                output.push(' ');
+                            } else {
+                                output.push(' ');
+                                output.push_str(&key);
+                                let padding = key_width.saturating_sub(key.chars().count());
+                                output.push_str(&" ".repeat(padding));
+                                output.push_str(" = ");
+                            }
+                        } else {
+                            output.push('|');
+                            if !is_positional_param(&key) {
+                                output.push_str(&key);
+                                output.push('=');
+                            }
                         }
                     }
                 } else if is_saved_template_tag(&name) {
@@ -395,7 +409,11 @@ pub fn restub_template_with_whitelist_xml(
                         output.push_str(&template_name);
                         append_template_attributes(&mut output, &event, Some(b"name"));
                         open_templates.push(if is_multiline_template_tag(&name) {
-                            TemplateStart::Multiline
+                            TemplateStart::Multiline {
+                                key_width: multiline_param_key_width(
+                                    escaped.get(position..).unwrap_or(""),
+                                ),
+                            }
                         } else {
                             TemplateStart::Inline
                         });
@@ -464,7 +482,7 @@ pub fn restub_template_with_whitelist_xml(
                     }
                 } else if is_multiline_template_tag(&name) {
                     match open_templates.pop() {
-                        Some(TemplateStart::Multiline) => output.push_str("\n}}"),
+                        Some(TemplateStart::Multiline { .. }) => output.push_str("\n}}"),
                         _ => output.push_str(raw),
                     }
                 } else if is_whitelisted_template(&name, whitelist) {
@@ -641,8 +659,8 @@ enum TemplateStart {
     /// still has to close the `{{...}}` on the same line.
     Inline,
     /// Inline template inside a `<template-m name="...">` wrapper. Its
-    /// parameters go one per line.
-    Multiline,
+    /// parameters go one per line, with keys padded to `key_width`.
+    Multiline { key_width: usize },
     /// A direct whitelisted tag like `<Korean ...>`. Only used so params inside
     /// it don't inherit a parent's multiline formatting.
     Compact,
@@ -662,6 +680,55 @@ fn is_saved_template_tag(name: &str) -> bool {
 /// Inline template that should be written back with one parameter per line.
 fn is_multiline_template_tag(name: &str) -> bool {
     name == "template-m"
+}
+
+/// Widest direct parameter key inside a `<template-m>` body.
+///
+/// The body is everything after the opening `<template-m ...>` tag, so the
+/// first `</template-m>` we reach at depth zero belongs to this template.
+/// Nested templates are skipped, since only their own `<template-m>` pads
+/// their parameters.
+fn multiline_param_key_width(body: &str) -> usize {
+    let mut reader = Reader::from_str(body);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut key_width = 0;
+
+    loop {
+        let event = reader.read_event_into(&mut buffer);
+
+        match event {
+            Ok(Event::Start(event)) => {
+                if depth == 0 && tag_name(&event) == "params" {
+                    key_width = key_width.max(param_key_width(&event));
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(event)) => {
+                if depth == 0 && tag_name(&event) == "params" {
+                    key_width = key_width.max(param_key_width(&event));
+                }
+            }
+            Ok(Event::End(event)) => {
+                if depth == 0 && event.name().as_ref() == b"template-m" {
+                    break;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+
+        buffer.clear();
+    }
+
+    key_width
+}
+
+fn param_key_width(event: &BytesStart<'_>) -> usize {
+    attribute_value(event, b"key")
+        .filter(|key| !is_positional_param(key))
+        .map_or(0, |key| key.chars().count())
 }
 
 /// Checks whether a tag name is one of the whitelisted templates we rendered
@@ -977,7 +1044,10 @@ mod tests {
             "<template-m name=\"Infobox food\"><params key=\"name\">Kimchi</params><params key=\"image\">Various kimchi.jpg</params></template-m>"
         );
         assert!(table.is_empty());
-        assert_eq!(restored, wikitext);
+        assert_eq!(
+            restored,
+            "{{Infobox food\n| name  = Kimchi\n| image = Various kimchi.jpg\n}}"
+        );
     }
 
     #[test]
