@@ -11,10 +11,10 @@ pub fn stub_template_with_whitelist_xml(
     let mut table: HashMap<String, String> = HashMap::new();
     let mut template_counts: HashMap<String, usize> = HashMap::new();
 
-    // top-level page text stays as-is. only text that goes inside a template
-    // (attributes / <params>) needs xml escaping.
-    let output =
-        render_nested_templates(wikitext, whitelist, &mut table, &mut template_counts, false);
+    // only attribute values need escaping. text (even inside <params>) stays
+    // readable, so markdown links like `[label](<Target (disambiguation)>)`
+    // don't turn into `&lt;...&gt;` for the AI.
+    let output = render_nested_templates(wikitext, whitelist, &mut table, &mut template_counts);
 
     (output, table)
 }
@@ -154,27 +154,44 @@ fn parse_template_whitelist(
         };
     }
 
+    // names like `Infobox food` have a space, so they can't be a tag name.
+    // those still stay inline, but inside a `<template name="...">` wrapper.
+    // every parameter becomes a `<params>` child there: attributes always come
+    // before children, which would reorder params around the wrapper's `name`.
+    let can_be_tag = is_valid_xml_name(&template_name);
     let mut attrs = String::new();
     let mut params_xml = String::new();
     for (key, value) in params {
-        if needs_params_element(&key, &value) {
+        if !can_be_tag || needs_params_element(&key, &value) {
             params_xml.push_str(&format!(
                 "<params key=\"{}\">{}</params>",
                 escape_xml_attribute(&key),
-                render_nested_templates(&value, whitelist, table, template_counts, true)
+                render_nested_templates(&value, whitelist, table, template_counts)
             ));
         } else {
             attrs.push_str(&format!(" {}=\"{}\"", key, escape_xml_attribute(&value)));
         }
     }
 
-    if params_xml.is_empty() {
-        format!("<{}{}/>", template_name, attrs)
-    } else {
-        format!(
-            "<{}{}>{}</{}>",
-            template_name, attrs, params_xml, template_name
+    let (open, close) = if can_be_tag {
+        (
+            format!("<{}", template_name),
+            format!("</{}>", template_name),
         )
+    } else {
+        (
+            format!(
+                "<template name=\"{}\"",
+                escape_xml_attribute(&template_name)
+            ),
+            "</template>".to_string(),
+        )
+    };
+
+    if params_xml.is_empty() {
+        format!("{}{}/>", open, attrs)
+    } else {
+        format!("{}{}>{}{}", open, attrs, params_xml, close)
     }
 }
 
@@ -206,7 +223,6 @@ fn render_nested_templates(
     whitelist: &[&str],
     table: &mut HashMap<String, String>,
     template_counts: &mut HashMap<String, usize>,
-    escape_text: bool,
 ) -> String {
     let mut output = String::new();
     let mut index = 0;
@@ -251,14 +267,9 @@ fn render_nested_templates(
             index += 2;
         } else {
             let ch = rest.chars().next().unwrap();
-            // top-level page text is left alone, so markdown links like
+            // leave text alone. only attribute values get escaped, so links like
             // `[label](<Target (disambiguation)>)` stay readable for the AI.
-            // text inside a template still gets escaped so the xml holds up.
-            if escape_text {
-                push_escaped_xml_text(&mut output, ch);
-            } else {
-                output.push(ch);
-            }
+            output.push(ch);
             index += ch.len_utf8();
         }
     }
@@ -266,27 +277,16 @@ fn render_nested_templates(
     output
 }
 
-/// Escapes page text that goes inside the xml.
+/// Escapes an attribute value.
 ///
-/// `<` and `>` matter the most here: markdown links can be written as
-/// `[label](<Target (disambiguation)>)`, and a raw `<` would make the xml
-/// reader think a template tag just started.
-fn push_escaped_xml_text(output: &mut String, ch: char) {
-    match ch {
-        '&' => output.push_str("&amp;"),
-        '<' => output.push_str("&lt;"),
-        '>' => output.push_str("&gt;"),
-        _ => output.push(ch),
-    }
-}
-
+/// `&` and `"` still have to be escaped so the value doesn't end the XML by
+/// accident, but `<` / `>` are left alone so links inside parameters stay
+/// readable (`p1="[abc (link)](<abc (link)>)"`).
 fn escape_xml_attribute(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {
             '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
             _ => escaped.push(ch),
         }
@@ -340,6 +340,10 @@ pub fn restub_template_with_whitelist_xml(
     let mut buffer = Vec::new();
     let mut output = String::new();
     let mut last_position = 0;
+    // a `<template name="...">` wrapper can hold an inline template whose real
+    // name has a space. remember how we treated each opening tag so its end
+    // tag knows whether to close the template or pass through.
+    let mut open_templates: Vec<TemplateStart> = Vec::new();
 
     loop {
         let event = reader.read_event_into(&mut buffer);
@@ -351,9 +355,9 @@ pub fn restub_template_with_whitelist_xml(
         match event {
             Ok(Event::Start(event)) => {
                 let name = tag_name(&event);
-                // only `params` and whitelisted template names are ours. any
-                // other start tag is page text that just happens to start with
-                // `<`, so we leave it alone.
+                // only `params`, `template`, and whitelisted template names are
+                // ours. any other start tag is page text that just happens to
+                // start with `<`, so we leave it alone.
                 if name == "params" {
                     if let Some(key) = attribute_value(&event, b"key") {
                         output.push('|');
@@ -362,10 +366,26 @@ pub fn restub_template_with_whitelist_xml(
                             output.push('=');
                         }
                     }
+                } else if name == "template" {
+                    let key = attribute_value(&event, b"name").unwrap_or_default();
+                    if let Some(template) = templates.get(&key) {
+                        output.push_str("{{");
+                        output.push_str(template);
+                        output.push_str("}}");
+                        open_templates.push(TemplateStart::Saved);
+                    } else if is_inline_template_key(&key, whitelist) {
+                        output.push_str("{{");
+                        output.push_str(&key);
+                        append_template_attributes(&mut output, &event, Some(b"name"));
+                        open_templates.push(TemplateStart::Inline);
+                    } else {
+                        output.push_str(raw);
+                        open_templates.push(TemplateStart::Text);
+                    }
                 } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("{{");
                     output.push_str(&name);
-                    append_template_attributes(&mut output, &event);
+                    append_template_attributes(&mut output, &event, None);
                 } else {
                     output.push_str(raw);
                 }
@@ -378,6 +398,11 @@ pub fn restub_template_with_whitelist_xml(
                             output.push_str("{{");
                             output.push_str(template);
                             output.push_str("}}");
+                        } else if is_inline_template_key(&key, whitelist) {
+                            output.push_str("{{");
+                            output.push_str(&key);
+                            append_template_attributes(&mut output, &event, Some(b"name"));
+                            output.push_str("}}");
                         } else {
                             output.push_str("<template name=\"");
                             output.push_str(&escape_xml_attribute(&key));
@@ -387,7 +412,7 @@ pub fn restub_template_with_whitelist_xml(
                 } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("{{");
                     output.push_str(&name);
-                    append_template_attributes(&mut output, &event);
+                    append_template_attributes(&mut output, &event, None);
                     output.push_str("}}");
                 } else {
                     output.push_str(raw);
@@ -397,6 +422,12 @@ pub fn restub_template_with_whitelist_xml(
                 let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
                 if name == "params" {
                     // The opening `<params>` already wrote the `|key=`.
+                } else if name == "template" {
+                    match open_templates.pop() {
+                        Some(TemplateStart::Inline) => output.push_str("}}"),
+                        Some(TemplateStart::Saved) => {}
+                        _ => output.push_str(raw),
+                    }
                 } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("}}");
                 } else {
@@ -409,6 +440,8 @@ pub fn restub_template_with_whitelist_xml(
             Ok(Event::CData(text)) => output.push_str(&String::from_utf8_lossy(text.as_ref())),
             Ok(Event::Eof) => break,
             Ok(_) => output.push_str(raw),
+            // if the xml is too broken, hand the text back untouched rather
+            // than half-restoring it
             Err(_) => return xml.to_string(),
         }
         last_position = position;
@@ -420,8 +453,11 @@ pub fn restub_template_with_whitelist_xml(
 
 /// Escapes a `<` unless it starts one of our template tags.
 ///
-/// Page text is no longer escaped at stub time, so leftover markdown links like
-/// `[label](<Target (disambiguation)>)` would otherwise confuse the xml reader.
+/// Page text and attribute values are displayed unescaped, so leftover markdown
+/// links like `[label](<Target (disambiguation)>)` would otherwise confuse the
+/// xml reader. Quotes only count as attribute delimiters once we are already
+/// inside one of our tags, so a stray `"` in prose can't swallow the next
+/// template.
 fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
     let mut output = String::with_capacity(xml.len());
     let mut index = 0;
@@ -430,20 +466,56 @@ fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
         let rest = &xml[index..];
 
         if rest.starts_with('<') {
-            let after = rest.strip_prefix("</").or_else(|| rest.strip_prefix('<'));
+            let after = rest
+                .strip_prefix("</")
+                .or_else(|| rest.strip_prefix('<'))
+                .unwrap_or("");
             let name: String = after
-                .unwrap_or("")
                 .chars()
-                .take_while(|ch| *ch == '_' || *ch == ':' || *ch == '-' || ch.is_alphanumeric())
+                .take_while(|ch| {
+                    *ch == '_' || *ch == ':' || *ch == '-' || *ch == '.' || ch.is_alphanumeric()
+                })
                 .collect();
+            let tail = &after[name.len()..];
 
-            if name == "template" || name == "params" || is_whitelisted_template(&name, whitelist) {
+            // a markdown link like `[Korean](<Korean cuisine>)` is text, not a
+            // `<Korean ...>` tag. our tags always have `>` / `/>` right after
+            // the name, or `key="value"` attributes, so a bare word after the
+            // name means page text.
+            let is_our_tag = looks_like_our_tag(tail)
+                && (name == "template"
+                    || name == "params"
+                    || is_whitelisted_template(&name, whitelist));
+
+            if is_our_tag {
+                // one of our tags, so copy it as a whole. a `<` inside one of
+                // its quoted attributes still has to become `&lt;`.
                 output.push('<');
+                index += 1;
+                let mut in_quotes = false;
+
+                while index < xml.len() {
+                    let ch = xml[index..].chars().next().unwrap();
+
+                    if ch == '"' {
+                        in_quotes = !in_quotes;
+                        output.push('"');
+                    } else if ch == '<' && in_quotes {
+                        output.push_str("&lt;");
+                    } else if ch == '>' && !in_quotes {
+                        output.push('>');
+                        index += ch.len_utf8();
+                        break;
+                    } else {
+                        output.push(ch);
+                    }
+
+                    index += ch.len_utf8();
+                }
             } else {
                 output.push_str("&lt;");
+                index += 1;
             }
-
-            index += 1;
         } else {
             let ch = rest.chars().next().unwrap();
             output.push(ch);
@@ -452,6 +524,37 @@ fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
     }
 
     output
+}
+
+/// Tells our generated tag apart from page text that starts with `<`.
+///
+/// Our tags look like `<small/>`, `<small p1="x"/>`, or `<template name="...">`.
+/// A markdown link target like `<Korean cuisine>` has a bare word after the
+/// name instead of an attribute, so it is text.
+fn looks_like_our_tag(tail: &str) -> bool {
+    if tail.starts_with('>') || tail.starts_with("/>") {
+        return true;
+    }
+
+    if !tail.chars().next().is_some_and(char::is_whitespace) {
+        return false;
+    }
+
+    let mut saw_equals = false;
+    let mut previous = '\0';
+    for ch in tail.chars() {
+        if ch == '>' {
+            return saw_equals || previous == '/';
+        }
+
+        if ch == '=' {
+            saw_equals = true;
+        }
+
+        previous = ch;
+    }
+
+    false
 }
 
 /// Unescapes the xml entities we care about, but leaves broken ones alone.
@@ -488,6 +591,20 @@ fn unescape_xml_text(text: &str) -> String {
     output
 }
 
+/// What we did with an opening `<template ...>` tag, so the matching end tag
+/// can do the same.
+#[derive(Clone, Copy)]
+enum TemplateStart {
+    /// Inline template inside a `<template name="...">` wrapper. The end tag
+    /// still has to close the `{{...}}`.
+    Inline,
+    /// A saved template written with an explicit end tag (not what stubbing
+    /// produces, but handle it anyway).
+    Saved,
+    /// Page text that only looked like a `<template>` tag.
+    Text,
+}
+
 /// Checks whether a tag name is one of the whitelisted templates we rendered
 /// into XML (with any `Template:` prefix stripped, just like stubbing does).
 fn is_whitelisted_template(name: &str, whitelist: &[&str]) -> bool {
@@ -499,6 +616,22 @@ fn is_whitelisted_template(name: &str, whitelist: &[&str]) -> bool {
     whitelist
         .iter()
         .any(|pattern| template_name_matches(pattern, normalized))
+}
+
+/// Saved templates always use a `name#n` key. A `<template name="...">` that
+/// isn't one of those is an inline template whose real name can't be a tag
+/// name (it has a space or a slash).
+fn is_inline_template_key(key: &str, whitelist: &[&str]) -> bool {
+    !looks_like_saved_key(key) && is_whitelisted_template(key, whitelist)
+}
+
+/// `Infobox#1`, `small#12`, ... all come from the saved-template map.
+fn looks_like_saved_key(key: &str) -> bool {
+    let Some((_, digits)) = key.rsplit_once('#') else {
+        return false;
+    };
+
+    !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
 }
 
 /// just gets the tag name, like `params` or `template`
@@ -522,8 +655,15 @@ fn attribute_value(event: &BytesStart<'_>, key: &[u8]) -> Option<String> {
 /// turns all the attributes back into |params.
 /// p1, p2, ... are positional, so they stay as just |value
 /// everything else becomes |key=value
-fn append_template_attributes(output: &mut String, event: &BytesStart<'_>) {
+///
+/// `skip` is for attributes we added ourselves, like the `name` on a
+/// `<template name="...">` wrapper.
+fn append_template_attributes(output: &mut String, event: &BytesStart<'_>, skip: Option<&[u8]>) {
     for attribute in event.attributes().with_checks(false).flatten() {
+        if skip.is_some_and(|key| attribute.key.as_ref() == key) {
+            continue;
+        }
+
         let key = String::from_utf8_lossy(attribute.key.as_ref());
         let value = attribute
             .unescape_value()
@@ -740,7 +880,7 @@ mod tests {
 
         assert!(xml.contains("&amp;"));
         assert!(xml.contains("&quot;"));
-        assert!(xml.contains("&lt;"));
+        assert!(xml.contains("<tag>"));
         assert_eq!(restored, wikitext);
     }
 
@@ -779,6 +919,83 @@ mod tests {
         );
 
         assert_eq!(restored, "Before <template name=\"Unknown#1\"/> after");
+    }
+
+    #[test]
+    fn whitelisted_template_names_with_spaces_stay_inline_in_a_template_wrapper() {
+        let wikitext = "{{Infobox Korean name/auto|hangul=김치}}";
+        let (xml, table, restored) = round_trip(wikitext, &["infobox*"]);
+
+        assert_eq!(
+            xml,
+            "<template name=\"Infobox Korean name/auto\"><params key=\"hangul\">김치</params></template>"
+        );
+        assert!(table.is_empty());
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn infobox_name_parameter_does_not_collide_with_the_wrapper_attribute() {
+        let wikitext = "{{Infobox food|name=Kimchi|image=Various kimchi.jpg}}";
+        let (xml, table, restored) = round_trip(wikitext, &["infobox*"]);
+
+        assert_eq!(
+            xml,
+            "<template name=\"Infobox food\"><params key=\"name\">Kimchi</params><params key=\"image\">Various kimchi.jpg</params></template>"
+        );
+        assert!(table.is_empty());
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn link_targets_that_look_like_tags_inside_params_stay_text() {
+        let wikitext = "{{Infobox food|associated_cuisine=[Korean](<Korean cuisine>)}}";
+        let (xml, _, restored) = round_trip(wikitext, &["infobox*", "korean"]);
+
+        assert_eq!(
+            xml,
+            "<template name=\"Infobox food\"><params key=\"associated_cuisine\">[Korean](<Korean cuisine>)</params></template>"
+        );
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn empty_whitelisted_template_with_spaces_round_trips() {
+        let wikitext = "{{Infobox food}}";
+        let (xml, _, restored) = round_trip(wikitext, &["infobox*"]);
+
+        assert_eq!(xml, "<template name=\"Infobox food\"/>");
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn unknown_saved_keys_are_not_mistaken_for_inline_templates() {
+        let restored = restub_template_with_whitelist_xml(
+            "Before <template name=\"Infobox food#1\"/> after",
+            &HashMap::new(),
+            &["infobox*"],
+        );
+
+        assert_eq!(restored, "Before <template name=\"Infobox food#1\"/> after");
+    }
+
+    #[test]
+    fn stray_quotes_in_page_text_do_not_break_restub() {
+        let wikitext = "5' 6\" {{Korean|hangul=만두}}";
+        let (xml, _, restored) = round_trip(wikitext, &["korean"]);
+
+        assert!(xml.contains("<Korean hangul=\"만두\"/>"));
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn only_attribute_values_are_escaped() {
+        let wikitext = "{{Outer|value=x < y & z {{Inner}}}}";
+        let (xml, _, restored) = round_trip(wikitext, &["Outer"]);
+
+        assert!(xml.contains("x < y & z"));
+        assert!(!xml.contains("&lt;"));
+        assert_eq!(restored, wikitext);
     }
 
     #[test]

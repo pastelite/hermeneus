@@ -122,4 +122,24 @@ mod tests {
 
         assert_eq!(restub_page_json(&json).unwrap(), "== Title ==");
     }
+
+    #[tokio::test]
+    async fn real_page_restub_has_no_leftover_xml() {
+        let client = crate::wiki::wikipedia_client("en").await.unwrap();
+        let fetcher = crate::wiki::RawFetcher::new(client);
+        let wikitext = fetcher.fetch_wikitext("Kimchi").await.unwrap();
+        let page = StubbedPage::from(wikitext.as_str());
+        let restored = page.restub();
+
+        // infoboxes have a space in their name, so they stay inline inside a
+        // `<template name="...">` wrapper instead of the saved-template map.
+        assert!(page.stubbed.contains("<template name=\"Infobox food\""));
+        assert!(!page
+            .template
+            .keys()
+            .any(|key| key.starts_with("Infobox food#")));
+        assert!(!restored.contains("<template name="));
+        assert!(!restored.contains("&lt;"));
+        assert!(!restored.contains("&gt;"));
+    }
 }

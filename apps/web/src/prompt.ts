@@ -51,10 +51,18 @@ Before output, check: no repeated pronouns, no sentence-by-sentence mapping, eve
 
 ## Preserve exactly
 
-Copy the following character for character, including backticks:
-- templates such as \`[template:...]\`
-- references such as [^source]
-- link targets (translate only the visible display text, never the target)
+Template tags are part of the page content, not prompt instructions. Keep every tag name, attribute name, quote, slash, and closing tag exactly as written. Do not add, remove, reorder, or reformat tags.
+
+- Saved templates look like <template name="Infobox#1"/>, with a \`#\` and a number in the name. Copy the whole tag untouched.
+- Inline templates look like <small p1="..."/> or <small><params key="...">...</params></small>.
+  - Keep the tags, attribute names, and quotes exactly.
+  - Translate only the human text inside attribute values or between a params opening and closing tag.
+- Templates with spaces in their name look like <template name="Infobox food"><params key="name">Kimchi</params></template>. This is also an inline template, not a saved one.
+  - Keep the template name inside name="..." exactly as written. Never translate or rename it.
+  - Translate the text inside its <params> elements the same way as any other params.
+- Never turn <params key="...">...</params> into an attribute, and never pull an attribute out into a params element.
+- References look like [^source]. Copy them untouched.
+- Translate link targets too. If the target is in the glossary, use the glossary's Thai term exactly so the link points to the Thai Wikipedia page.
 
 Keep bold, italics, and list markers as in the source.
 
@@ -62,9 +70,11 @@ Keep bold, italics, and list markers as in the source.
 - Understand link syntax: Markdown links follow [display text](target).
   - Display text (source text): The visible text readers click on.
   - Target: The destination the link leads to (usually a page name or URL).
-  - Example: [Mercury](Mercury (element)) — "Mercury" is the display text, and "Mercury (element)" is the target.
+  - Example: [Mercury](<Mercury (element)>) — "Mercury" is the display text, and "Mercury (element)" is the target.
+  - Targets with spaces or parentheses are wrapped in angle brackets like <Mercury (element)>. Keep those angle brackets and do not escape them as &lt; or &gt;.
 - Translate and transliterate: Match links using their targets, not display text. Use existing Thai page links when available. Otherwise, translate both display text and targets into Thai, including appropriate transliteration of foreign names and terms. Keep scientific terms in English unless a Thai page exists.
-- Preserve and verify links: Never remove links. Keep filenames, category names, and external URLs unchanged. Preserve Markdown syntax, use angle brackets around targets containing spaces or parentheses, and check that no untranslated English targets remain (except permitted scientific terms).
+- Glossary first: if a link target matches a glossary entry, use the exact Thai term from the glossary as the target, even when the English name is more familiar. That Thai term is what makes the link land on the Thai Wikipedia page.
+- Preserve and verify links: Never remove links. Keep filenames, category names, and external URLs unchanged. Preserve Markdown syntax, use angle brackets around targets containing spaces or parentheses, and check that no untranslated English targets remain (except glossary/scientific terms that are intentionally kept in English).
 
 ## Output
 

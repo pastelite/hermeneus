@@ -105,6 +105,19 @@ mod tests {
     }
 
     #[test]
+    fn from_wikitext_keeps_angle_bracket_links_readable_inside_template_params() {
+        let wikitext = "{{small|[[abc (link)]]}}";
+        let page = StubbedPage::from(wikitext);
+
+        assert!(page
+            .stubbed
+            .contains("<small p1=\"[abc (link)](<abc (link)>)\"/>"));
+        assert!(!page.stubbed.contains("&lt;"));
+        assert!(!page.stubbed.contains("&gt;"));
+        assert_eq!(page.restub(), wikitext);
+    }
+
+    #[test]
     fn to_json_serializes_the_page_and_metadata() {
         let page = StubbedPage {
             stubbed: "[ABC](ABCTranslated) [^source] <template name=\"Infobox#1\"/>".to_string(),
