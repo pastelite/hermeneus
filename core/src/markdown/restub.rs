@@ -130,91 +130,6 @@ pub(super) fn restub_references(wikitext: &str, references: &HashMap<String, Str
     apply_replacements(wikitext.to_string(), replacements)
 }
 
-/// Restores backtick-quoted `` `[template:...]` `` placeholders to wikitext.
-///
-/// A placeholder body that is a saved `name#n` key is looked up in `templates`.
-/// Whitelisted templates keep their arguments in the placeholder itself, so
-/// they are restored directly. Unknown `name#n` keys are left untouched.
-pub(super) fn restub_templates(wikitext: &str, templates: &HashMap<String, String>) -> String {
-    const PREFIX: &str = "`[template:";
-    let mut replacements = Vec::new();
-    let mut search_from = 0;
-
-    while let Some(prefix_offset) = wikitext[search_from..].find(PREFIX) {
-        let start = search_from + prefix_offset;
-        let body_start = start + PREFIX.len();
-        let mut escaped = false;
-        let mut closing_bracket = None;
-
-        for (offset, character) in wikitext[body_start..].char_indices() {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            if character == '\\' {
-                escaped = true;
-                continue;
-            }
-            if character == ']' && wikitext[body_start + offset + 1..].starts_with('`') {
-                closing_bracket = Some(body_start + offset);
-                break;
-            }
-        }
-
-        let Some(closing_bracket) = closing_bracket else {
-            break;
-        };
-        let body = unescape_template_token(&wikitext[body_start..closing_bracket]);
-        let restored = if let Some(value) = templates.get(&body) {
-            format!("{{{{{value}}}}}")
-        } else if is_template_map_key(&body) {
-            search_from = closing_bracket + 2;
-            continue;
-        } else {
-            format!("{{{{{body}}}}}")
-        };
-        let end = closing_bracket + 2;
-        replacements.push((start..end, restored));
-        search_from = end;
-    }
-
-    apply_replacements(wikitext.to_string(), replacements)
-}
-
-/// Returns whether `template` looks like a saved `name#n` template map key.
-///
-/// Keys containing arguments (`name|arg`) are inline templates rather than map
-/// keys, and the part after `#` must be a non-empty number.
-fn is_template_map_key(template: &str) -> bool {
-    if template.contains('|') {
-        return false;
-    }
-    let Some((_, number)) = template.rsplit_once('#') else {
-        return false;
-    };
-    !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
-}
-
-/// Removes backslash escapes for `\` and `]` inside a template placeholder.
-fn unescape_template_token(template: &str) -> String {
-    let mut characters = template.chars().peekable();
-    let mut output = String::new();
-
-    while let Some(character) = characters.next() {
-        if character == '\\'
-            && characters
-                .peek()
-                .is_some_and(|next| matches!(next, '\\' | ']'))
-        {
-            output.push(characters.next().expect("peeked character exists"));
-        } else {
-            output.push(character);
-        }
-    }
-
-    output
-}
-
 /// Applies `replacements` from the end of `text` so earlier byte ranges remain
 /// valid as the string is rewritten.
 fn apply_replacements(mut text: String, replacements: Vec<(Range<usize>, String)>) -> String {
@@ -262,35 +177,6 @@ mod tests {
             restub_references("[^source] [^source] [^2] [^empty] [^missing]", &references),
             "<ref name=\"source\">Citation</ref> <ref name=\"source\" /> <ref>Unnamed citation</ref> <ref name=\"empty\" /> [^missing]"
         );
-    }
-
-    #[test]
-    fn restub_templates_restores_saved_and_inline_templates() {
-        let templates =
-            HashMap::from([("Infobox#1".to_string(), "Infobox|name=Example".to_string())]);
-
-        assert_eq!(
-            restub_templates(
-                "`[template:Infobox#1]` `[template:small|text]` `[template:Unknown#1]`",
-                &templates,
-            ),
-            "{{Infobox|name=Example}} {{small|text}} `[template:Unknown#1]`"
-        );
-    }
-
-    #[test]
-    fn is_template_map_key_requires_a_numeric_suffix_and_no_arguments() {
-        assert!(is_template_map_key("Infobox#1"));
-        assert!(is_template_map_key("small#12"));
-        assert!(!is_template_map_key("Infobox|name=Example#1"));
-        assert!(!is_template_map_key("Infobox"));
-        assert!(!is_template_map_key("Infobox#"));
-        assert!(!is_template_map_key("Infobox#x"));
-    }
-
-    #[test]
-    fn unescape_template_token_removes_backslash_escapes() {
-        assert_eq!(unescape_template_token(r"a\\b\]c"), r"a\b]c");
     }
 
     #[test]

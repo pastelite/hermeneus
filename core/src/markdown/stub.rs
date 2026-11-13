@@ -20,118 +20,6 @@ pub const TEMPLATE_WHITELIST: &[&str] = &[
     "infobox*", // test might not work well but let's try
 ];
 
-/// Replaces MediaWiki template invocations in `wikitext` with placeholder tokens.
-///
-/// Templates in [`TEMPLATE_WHITELIST`] stay inline as
-/// `` `[template:name|args]` ``. Every other template is stored in the returned
-/// map under a `name#n` key and replaced with `` `[template:name#n]` ``, where
-/// `n` distinguishes repeated uses of the same template name.
-pub fn stub_template(wikitext: &str) -> (String, HashMap<String, String>) {
-    stub_template_with_whitelist(wikitext, TEMPLATE_WHITELIST)
-}
-
-/// Replaces templates in `wikitext` like [`stub_template`], using `whitelist`
-/// to decide which templates stay inline.
-///
-/// Each whitelist pattern is matched case-insensitively against the template
-/// name with any `Template:` prefix removed. A pattern ending in `*` matches
-/// every template whose name starts with the text before the `*`. Templates
-/// that do not match are stored in the returned map under a `name#n` key.
-pub fn stub_template_with_whitelist(
-    wikitext: &str,
-    whitelist: &[&str],
-) -> (String, HashMap<String, String>) {
-    let mut template_depth = 0;
-    let mut output = String::new();
-    let mut table: HashMap<String, String> = HashMap::new();
-    let mut template_counts: HashMap<String, usize> = HashMap::new();
-
-    let mut chars = wikitext.chars().peekable();
-    let mut current_buffer = String::new();
-
-    while let Some(current) = chars.next() {
-        let next_char = chars.peek();
-
-        if template_depth > 0 {
-            if current == '{' && next_char == Some(&'{') {
-                template_depth += 1;
-                current_buffer.push_str("{{");
-                chars.next();
-            } else if current == '}' && next_char == Some(&'}') {
-                template_depth -= 1;
-                chars.next();
-
-                if template_depth == 0 {
-                    let template_name = match current_buffer.find('|') {
-                        Some(num) => &current_buffer[..num],
-                        None => &current_buffer,
-                    }
-                    .trim()
-                    .to_string();
-                    let normalized_template_name = template_name
-                        .strip_prefix("Template:")
-                        .or_else(|| template_name.strip_prefix("template:"))
-                        .unwrap_or(&template_name)
-                        .trim();
-
-                    let template = std::mem::take(&mut current_buffer);
-                    if whitelist
-                        .iter()
-                        .any(|pattern| template_name_matches(pattern, normalized_template_name))
-                    {
-                        output.push_str(&format!(
-                            "`[template:{}]`",
-                            escape_template_token(&template)
-                        ));
-                    } else {
-                        let count = template_counts
-                            .entry(template_name.clone())
-                            .and_modify(|count| *count += 1)
-                            .or_insert(1);
-                        let template_key = format!("{}#{}", template_name, count);
-                        output.push_str(&format!(
-                            "`[template:{}]`",
-                            escape_template_token(&template_key)
-                        ));
-                        table.insert(template_key, template);
-                    }
-                } else {
-                    current_buffer.push_str("}}");
-                }
-            } else {
-                current_buffer.push(current);
-            }
-        } else {
-            if current == '{' && next_char == Some(&'{') {
-                template_depth = 1;
-                chars.next();
-            } else {
-                output.push(current);
-            }
-        }
-    }
-
-    (output, table)
-}
-
-/// Escapes characters that would otherwise terminate a template placeholder.
-fn escape_template_token(template: &str) -> String {
-    template.replace('\\', "\\\\").replace(']', "\\]")
-}
-
-/// Returns whether a whitelist `pattern` matches `template_name`.
-///
-/// Matching is case-insensitive. A trailing `*` turns the pattern into a
-/// prefix match, so `lang-*` matches `lang-en` and `Lang-de`.
-fn template_name_matches(pattern: &str, template_name: &str) -> bool {
-    let Some(prefix) = pattern.strip_suffix('*') else {
-        return pattern.eq_ignore_ascii_case(template_name);
-    };
-    template_name
-        .get(..prefix.len())
-        .is_some_and(|name_prefix| name_prefix.eq_ignore_ascii_case(prefix))
-}
-
 /// Replaces `<ref>` tags in `wikitext` with Markdown footnote markers.
 ///
 /// A named ref such as `<ref name="source">Citation</ref>` reuses the same key
@@ -329,135 +217,6 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn stub_template_keeps_nested_templates_until_the_outer_template_closes() {
-        let wikitext =
-            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
-
-        let (stubbed, templates) = stub_template(wikitext);
-
-        assert_eq!(
-            stubbed,
-            "Before `[template:Outer#1]` after `[template:Sibling#1]`."
-        );
-        assert_eq!(
-            templates,
-            HashMap::from([
-                (
-                    "Outer#1".to_string(),
-                    "Outer|value={{Middle|value={{Inner}}}}".to_string()
-                ),
-                ("Sibling#1".to_string(), "Sibling|name=soy".to_string()),
-            ])
-        );
-    }
-
-    #[test]
-    fn stub_and_restub_nested_templates_round_trip() {
-        let wikitext =
-            "Before {{Outer|value={{Middle|value={{Inner}}}}}} after {{Sibling|name=soy}}.";
-        let (stubbed, templates) = stub_template(wikitext);
-        let page = StubbedPage {
-            stubbed,
-            template: templates,
-            references: HashMap::new(),
-        };
-
-        assert_eq!(
-            page.stubbed,
-            "Before `[template:Outer#1]` after `[template:Sibling#1]`."
-        );
-        assert_eq!(page.restub(), wikitext);
-    }
-
-    #[test]
-    fn stub_template_numbers_repeated_template_names_with_a_separate_counter_map() {
-        let (stubbed, templates) =
-            stub_template("{{Box|one}} {{Box|two}} {{Other|three}} {{Box|four}}");
-
-        assert_eq!(
-            stubbed,
-            "`[template:Box#1]` `[template:Box#2]` `[template:Other#1]` `[template:Box#3]`"
-        );
-        assert_eq!(templates.get("Box#2").map(String::as_str), Some("Box|two"));
-        assert_eq!(templates.len(), 4);
-    }
-
-    #[test]
-    fn whitelisted_templates_stay_inline_and_escape_closing_brackets() {
-        let wikitext = r"{{small|text [[Target|label]] and \ path}}";
-        let (stubbed, templates) = stub_template(wikitext);
-
-        assert_eq!(
-            stubbed,
-            r"`[template:small|text [[Target|label\]\] and \\ path]`"
-        );
-        assert!(templates.is_empty());
-        assert_eq!(
-            StubbedPage {
-                stubbed,
-                template: templates,
-                references: HashMap::new(),
-            }
-            .restub(),
-            wikitext
-        );
-    }
-
-    #[test]
-    fn template_whitelist_supports_case_insensitive_prefix_wildcards() {
-        let (stubbed, templates) = stub_template(
-            "{{lang-en|hello}} {{lang-de|hallo}} {{Lang-en|Hi}} {{other-lang-en|ignored}}",
-        );
-
-        assert_eq!(
-            stubbed,
-            "`[template:lang-en|hello]` `[template:lang-de|hallo]` `[template:Lang-en|Hi]` `[template:other-lang-en#1]`"
-        );
-        assert_eq!(templates.len(), 1);
-        assert_eq!(
-            templates.get("other-lang-en#1").map(String::as_str),
-            Some("other-lang-en|ignored")
-        );
-    }
-
-    #[tokio::test]
-    async fn stub_template_english_page_after_ref() {
-        let client = crate::wiki::wikipedia_client("en").await.unwrap();
-        let fetcher = RawFetcher::new(client);
-        let wikitext = fetcher.fetch_wikitext("Hello").await.unwrap();
-        assert!(!wikitext.is_empty());
-        let stubbed_ref = stub_ref(&wikitext);
-        let stubbed = stub_template(&stubbed_ref.0);
-        println!("{:#?}", stubbed);
-    }
-
-    #[test]
-    fn stub_template_with_whitelist_uses_the_supplied_whitelist() {
-        let (stubbed, templates) =
-            stub_template_with_whitelist("{{keep|one}} {{store|two}}", &["keep"]);
-
-        assert_eq!(stubbed, "`[template:keep|one]` `[template:store#1]`");
-        assert_eq!(
-            templates.get("store#1").map(String::as_str),
-            Some("store|two")
-        );
-    }
-
-    #[test]
-    fn escape_template_token_escapes_backslashes_and_closing_brackets() {
-        assert_eq!(escape_template_token(r"a\b]c"), r"a\\b\]c");
-    }
-
-    #[test]
-    fn template_name_matches_supports_exact_names_and_prefix_wildcards() {
-        assert!(template_name_matches("small", "Small"));
-        assert!(!template_name_matches("small", "smaller"));
-        assert!(template_name_matches("lang-*", "lang-en"));
-        assert!(template_name_matches("lang-*", "Lang-de"));
-        assert!(!template_name_matches("lang-*", "other-lang-en"));
-    }
-
-    #[test]
     fn stub_ref_reuses_named_refs_and_numbers_unnamed_refs() {
         let (output, references) = stub_ref(
             "Before <ref name=\"source\">Citation</ref>, after <ref name='source' /> and <ref>Another citation</ref>.",
@@ -526,16 +285,20 @@ mod tests {
 
     #[test]
     fn stub_links_preserves_file_links_and_their_pipe_options() {
-        let wikitext = "{{Infobox|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
-        let (without_templates, templates) = stub_template(wikitext);
+        let wikitext = "{{Box|image=Soja_texturiert.jpg}} [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [[Image|the Image article]]";
+        let (without_templates, templates) =
+            crate::markdown::template_new::stub_template_with_whitelist_xml(
+                wikitext,
+                TEMPLATE_WHITELIST,
+            );
 
         assert_eq!(
-            templates.get("Infobox#1").map(String::as_str),
-            Some("Infobox|image=Soja_texturiert.jpg")
+            templates.get("Box#1").map(String::as_str),
+            Some("Box|image=Soja_texturiert.jpg")
         );
         assert_eq!(
             stub_links(&without_templates),
-            "`[template:Infobox#1]` [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
+            "<template name=\"Box#1\"/> [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
         );
     }
 

@@ -11,7 +11,10 @@ pub fn stub_template_with_whitelist_xml(
     let mut table: HashMap<String, String> = HashMap::new();
     let mut template_counts: HashMap<String, usize> = HashMap::new();
 
-    let output = render_nested_templates(wikitext, whitelist, &mut table, &mut template_counts);
+    // top-level page text stays as-is. only text that goes inside a template
+    // (attributes / <params>) needs xml escaping.
+    let output =
+        render_nested_templates(wikitext, whitelist, &mut table, &mut template_counts, false);
 
     (output, table)
 }
@@ -158,7 +161,7 @@ fn parse_template_whitelist(
             params_xml.push_str(&format!(
                 "<params key=\"{}\">{}</params>",
                 escape_xml_attribute(&key),
-                render_nested_templates(&value, whitelist, table, template_counts)
+                render_nested_templates(&value, whitelist, table, template_counts, true)
             ));
         } else {
             attrs.push_str(&format!(" {}=\"{}\"", key, escape_xml_attribute(&value)));
@@ -203,6 +206,7 @@ fn render_nested_templates(
     whitelist: &[&str],
     table: &mut HashMap<String, String>,
     template_counts: &mut HashMap<String, usize>,
+    escape_text: bool,
 ) -> String {
     let mut output = String::new();
     let mut index = 0;
@@ -247,7 +251,14 @@ fn render_nested_templates(
             index += 2;
         } else {
             let ch = rest.chars().next().unwrap();
-            push_escaped_xml_text(&mut output, ch);
+            // top-level page text is left alone, so markdown links like
+            // `[label](<Target (disambiguation)>)` stay readable for the AI.
+            // text inside a template still gets escaped so the xml holds up.
+            if escape_text {
+                push_escaped_xml_text(&mut output, ch);
+            } else {
+                output.push(ch);
+            }
             index += ch.len_utf8();
         }
     }
@@ -255,6 +266,11 @@ fn render_nested_templates(
     output
 }
 
+/// Escapes page text that goes inside the xml.
+///
+/// `<` and `>` matter the most here: markdown links can be written as
+/// `[label](<Target (disambiguation)>)`, and a raw `<` would make the xml
+/// reader think a template tag just started.
 fn push_escaped_xml_text(output: &mut String, ch: char) {
     match ch {
         '&' => output.push_str("&amp;"),
@@ -309,18 +325,35 @@ fn is_valid_xml_name(name: &str) -> bool {
 ///
 /// Saved templates are looked up in `templates`; a missing key is left as its
 /// `<template name="..."/>` element so no template content is fabricated.
+/// Anything that is not one of our whitelisted template tags is copied back
+/// verbatim, so stray `<...>` in the page text survives the XML reader.
 pub fn restub_template_with_whitelist_xml(
     xml: &str,
     templates: &HashMap<String, String>,
+    whitelist: &[&str],
 ) -> String {
-    let mut reader = Reader::from_str(xml);
+    // page text is not escaped anymore, so a stray `<` from a markdown link or
+    // wikitext would make the xml reader panic. escape just those, not the
+    // `<` that starts one of our template tags.
+    let escaped = escape_non_template_angle_brackets(xml, whitelist);
+    let mut reader = Reader::from_str(&escaped);
     let mut buffer = Vec::new();
     let mut output = String::new();
+    let mut last_position = 0;
 
     loop {
-        match reader.read_event_into(&mut buffer) {
+        let event = reader.read_event_into(&mut buffer);
+        let position = reader.buffer_position() as usize;
+        // keep the raw slice around so anything that is not one of our tags can
+        // be put back exactly as it came in, `<Target (disambiguation)>` and all
+        let raw = escaped.get(last_position..position).unwrap_or("");
+
+        match event {
             Ok(Event::Start(event)) => {
                 let name = tag_name(&event);
+                // only `params` and whitelisted template names are ours. any
+                // other start tag is page text that just happens to start with
+                // `<`, so we leave it alone.
                 if name == "params" {
                     if let Some(key) = attribute_value(&event, b"key") {
                         output.push('|');
@@ -329,10 +362,12 @@ pub fn restub_template_with_whitelist_xml(
                             output.push('=');
                         }
                     }
-                } else {
+                } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("{{");
                     output.push_str(&name);
                     append_template_attributes(&mut output, &event);
+                } else {
+                    output.push_str(raw);
                 }
             }
             Ok(Event::Empty(event)) => {
@@ -349,31 +384,121 @@ pub fn restub_template_with_whitelist_xml(
                             output.push_str("\"/>");
                         }
                     }
-                } else {
+                } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("{{");
                     output.push_str(&name);
                     append_template_attributes(&mut output, &event);
                     output.push_str("}}");
+                } else {
+                    output.push_str(raw);
                 }
             }
             Ok(Event::End(event)) => {
-                if event.name().as_ref() != b"params" {
+                let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
+                if name == "params" {
+                    // The opening `<params>` already wrote the `|key=`.
+                } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("}}");
+                } else {
+                    output.push_str(raw);
                 }
             }
-            Ok(Event::Text(text)) => match text.unescape() {
-                Ok(text) => output.push_str(&text),
-                Err(_) => output.push_str(&String::from_utf8_lossy(text.as_ref())),
-            },
+            Ok(Event::Text(text)) => {
+                output.push_str(&unescape_xml_text(&String::from_utf8_lossy(text.as_ref())))
+            }
             Ok(Event::CData(text)) => output.push_str(&String::from_utf8_lossy(text.as_ref())),
             Ok(Event::Eof) => break,
-            Ok(_) => {}
+            Ok(_) => output.push_str(raw),
             Err(_) => return xml.to_string(),
         }
+        last_position = position;
         buffer.clear();
     }
 
     output
+}
+
+/// Escapes a `<` unless it starts one of our template tags.
+///
+/// Page text is no longer escaped at stub time, so leftover markdown links like
+/// `[label](<Target (disambiguation)>)` would otherwise confuse the xml reader.
+fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
+    let mut output = String::with_capacity(xml.len());
+    let mut index = 0;
+
+    while index < xml.len() {
+        let rest = &xml[index..];
+
+        if rest.starts_with('<') {
+            let after = rest.strip_prefix("</").or_else(|| rest.strip_prefix('<'));
+            let name: String = after
+                .unwrap_or("")
+                .chars()
+                .take_while(|ch| *ch == '_' || *ch == ':' || *ch == '-' || ch.is_alphanumeric())
+                .collect();
+
+            if name == "template" || name == "params" || is_whitelisted_template(&name, whitelist) {
+                output.push('<');
+            } else {
+                output.push_str("&lt;");
+            }
+
+            index += 1;
+        } else {
+            let ch = rest.chars().next().unwrap();
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+
+    output
+}
+
+/// Unescapes the xml entities we care about, but leaves broken ones alone.
+///
+/// The page can still contain a plain `&` from wikitext, so `text.unescape()`
+/// would fail on the whole chunk just because of one character.
+fn unescape_xml_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut index = 0;
+
+    while index < text.len() {
+        let rest = &text[index..];
+        let (replacement, length) = if rest.starts_with("&lt;") {
+            ("<", 4)
+        } else if rest.starts_with("&gt;") {
+            (">", 4)
+        } else if rest.starts_with("&amp;") {
+            ("&", 5)
+        } else if rest.starts_with("&quot;") {
+            ("\"", 6)
+        } else if rest.starts_with("&apos;") {
+            ("'", 6)
+        } else {
+            let ch = rest.chars().next().unwrap();
+            output.push(ch);
+            index += ch.len_utf8();
+            continue;
+        };
+
+        output.push_str(replacement);
+        index += length;
+    }
+
+    output
+}
+
+/// Checks whether a tag name is one of the whitelisted templates we rendered
+/// into XML (with any `Template:` prefix stripped, just like stubbing does).
+fn is_whitelisted_template(name: &str, whitelist: &[&str]) -> bool {
+    let normalized = name
+        .strip_prefix("Template:")
+        .or_else(|| name.strip_prefix("template:"))
+        .unwrap_or(name)
+        .trim();
+    whitelist
+        .iter()
+        .any(|pattern| template_name_matches(pattern, normalized))
 }
 
 /// just gets the tag name, like `params` or `template`
@@ -445,7 +570,7 @@ mod tests {
 
     fn round_trip(wikitext: &str, whitelist: &[&str]) -> (String, HashMap<String, String>, String) {
         let (xml, table) = stub_template_with_whitelist_xml(wikitext, whitelist);
-        let restored = restub_template_with_whitelist_xml(&xml, &table);
+        let restored = restub_template_with_whitelist_xml(&xml, &table, whitelist);
         (xml, table, restored)
     }
 
@@ -650,9 +775,20 @@ mod tests {
         let restored = restub_template_with_whitelist_xml(
             "Before <template name=\"Unknown#1\"/> after",
             &HashMap::new(),
+            &[],
         );
 
         assert_eq!(restored, "Before <template name=\"Unknown#1\"/> after");
+    }
+
+    #[test]
+    fn stub_keeps_angle_bracket_links_readable() {
+        let wikitext = "[โดเมน](<โดเมน (ชีววิทยา)>), A & B < C";
+        let (xml, _, restored) = round_trip(wikitext, &[]);
+
+        assert!(!xml.contains("&lt;"));
+        assert!(!xml.contains("&gt;"));
+        assert_eq!(restored, wikitext);
     }
 
     #[test]

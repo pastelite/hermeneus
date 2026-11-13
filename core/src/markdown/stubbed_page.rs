@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::restub::{restub_links, restub_references, restub_templates, restub_title};
-use super::stub::{stub_links, stub_ref, stub_template, stub_title};
+use super::restub::{restub_links, restub_references, restub_title};
+use super::stub::{stub_links, stub_ref, stub_title, TEMPLATE_WHITELIST};
+use super::template_new::{restub_template_with_whitelist_xml, stub_template_with_whitelist_xml};
 
 /// A page whose wikitext has been converted to Markdown-like text with
 /// placeholder tokens for templates and references.
@@ -20,10 +21,16 @@ impl StubbedPage {
     /// Converts `wikitext` to Markdown and collects the templates and
     /// references that were replaced with tokens.
     pub fn from_wikitext(wikitext: &str) -> Self {
-        let (template_wikitext, template) = stub_template(wikitext);
-        let (reference_wikitext, references) = stub_ref(&template_wikitext);
+        // Refs and links are stubbed before templates so their placeholder
+        // tokens end up inside the template XML (and get restored again after
+        // the templates do). Links like `[label](<Target (disambiguation)>)`
+        // already exist before the template step, and top-level text is left
+        // unescaped so the AI sees readable markdown.
+        let (reference_wikitext, references) = stub_ref(wikitext);
         let link_wikitext = stub_links(&reference_wikitext);
-        let stubbed = stub_title(&link_wikitext);
+        let title_wikitext = stub_title(&link_wikitext);
+        let (stubbed, template) =
+            stub_template_with_whitelist_xml(&title_wikitext, TEMPLATE_WHITELIST);
 
         Self {
             stubbed,
@@ -44,9 +51,14 @@ impl StubbedPage {
 
     /// Restores the stubbed Markdown-like text to MediaWiki wikitext.
     pub fn restub(&self) -> String {
-        let wikitext = restub_links(&self.stubbed);
+        // Do the templates first. Restoring refs and links afterwards turns
+        // their placeholder tokens back into wikitext. Top-level text was not
+        // escaped, so restub also puts stray `<...>` from markdown links back
+        // exactly as it found them.
+        let wikitext =
+            restub_template_with_whitelist_xml(&self.stubbed, &self.template, TEMPLATE_WHITELIST);
         let wikitext = restub_references(&wikitext, &self.references);
-        let wikitext = restub_templates(&wikitext, &self.template);
+        let wikitext = restub_links(&wikitext);
         restub_title(&wikitext)
     }
 }
@@ -64,16 +76,16 @@ mod tests {
 
     #[test]
     fn from_wikitext_returns_markdown_and_tokens() {
-        let wikitext = "{{Infobox|name=Example}}\n== Title ==\n[[Target|Label]] <ref name=\"source\">Citation</ref>";
+        let wikitext = "{{Box|name=Example}}\n== Title ==\n[[Target|Label]] <ref name=\"source\">Citation</ref>";
         let page = StubbedPage::from(wikitext);
 
-        assert!(page.stubbed.contains("`[template:Infobox#1]`"));
+        assert!(page.stubbed.contains("<template name=\"Box#1\"/>"));
         assert!(page.stubbed.contains("## Title"));
         assert!(page.stubbed.contains("[Label](Target)"));
         assert!(page.stubbed.contains("[^source]"));
         assert_eq!(
-            page.template.get("Infobox#1").map(String::as_str),
-            Some("Infobox|name=Example")
+            page.template.get("Box#1").map(String::as_str),
+            Some("Box|name=Example")
         );
         assert_eq!(
             page.references.get("source").map(String::as_str),
@@ -82,9 +94,20 @@ mod tests {
     }
 
     #[test]
+    fn from_wikitext_keeps_angle_bracket_links_readable() {
+        let wikitext = "[[โดเมน (ชีววิทยา)|โดเมน]] and A & B";
+        let page = StubbedPage::from(wikitext);
+
+        assert!(page.stubbed.contains("[โดเมน](<โดเมน (ชีววิทยา)>)"));
+        assert!(!page.stubbed.contains("&lt;"));
+        assert!(!page.stubbed.contains("&gt;"));
+        assert_eq!(page.restub(), wikitext);
+    }
+
+    #[test]
     fn to_json_serializes_the_page_and_metadata() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox#1]`".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] <template name=\"Infobox#1\"/>".to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),
                 "Infobox|name=Example".to_string(),
@@ -103,7 +126,7 @@ mod tests {
     #[test]
     fn from_json_restores_the_page_and_metadata() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] `[template:Infobox#1]`".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] <template name=\"Infobox#1\"/>".to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),
                 "Infobox|name=Example".to_string(),
@@ -122,7 +145,8 @@ mod tests {
     #[test]
     fn restub_restores_links_references_and_templates() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] [^2] `[template:Infobox#1]`".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] [^2] <template name=\"Infobox#1\"/>"
+                .to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),
                 "Infobox|name=Example".to_string(),
