@@ -36,8 +36,10 @@ fn parse_template_saved(
         .or_insert(1);
     let template_key = format!("{}#{}", template_name, count);
     table.insert(template_key.to_owned(), template.to_owned());
+    // saved templates always use their own tag. the body (newlines and all) is
+    // already kept verbatim in the table, so nothing else is needed here.
     format!(
-        "<template name=\"{}\"/>",
+        "<template-s name=\"{}\"/>",
         escape_xml_attribute(&template_key)
     )
 }
@@ -78,6 +80,7 @@ fn parse_template_whitelist(
     table: &mut HashMap<String, String>,
     template_counts: &mut HashMap<String, usize>,
 ) -> String {
+    let is_multiline = template.contains('\n') || template.contains('\r');
     let mut template = template.to_string();
     let template_name = match template.find('|') {
         Some(num) => {
@@ -158,6 +161,8 @@ fn parse_template_whitelist(
     // those still stay inline, but inside a `<template name="...">` wrapper.
     // every parameter becomes a `<params>` child there: attributes always come
     // before children, which would reorder params around the wrapper's `name`.
+    // a multiline template (an infobox, usually) uses `<template-m>` so restub
+    // writes it back one parameter per line instead of one unreadable line.
     let can_be_tag = is_valid_xml_name(&template_name);
     let mut attrs = String::new();
     let mut params_xml = String::new();
@@ -179,12 +184,14 @@ fn parse_template_whitelist(
             format!("</{}>", template_name),
         )
     } else {
+        let tag = if is_multiline {
+            "template-m"
+        } else {
+            "template"
+        };
         (
-            format!(
-                "<template name=\"{}\"",
-                escape_xml_attribute(&template_name)
-            ),
-            "</template>".to_string(),
+            format!("<{} name=\"{}\"", tag, escape_xml_attribute(&template_name)),
+            format!("</{}>", tag),
         )
     };
 
@@ -324,7 +331,7 @@ fn is_valid_xml_name(name: &str) -> bool {
 /// Restores the XML-like template output to MediaWiki wikitext.
 ///
 /// Saved templates are looked up in `templates`; a missing key is left as its
-/// `<template name="..."/>` element so no template content is fabricated.
+/// `<template-s name="..."/>` element so no template content is fabricated.
 /// Anything that is not one of our whitelisted template tags is copied back
 /// verbatim, so stray `<...>` in the page text survives the XML reader.
 pub fn restub_template_with_whitelist_xml(
@@ -360,24 +367,38 @@ pub fn restub_template_with_whitelist_xml(
                 // start with `<`, so we leave it alone.
                 if name == "params" {
                     if let Some(key) = attribute_value(&event, b"key") {
+                        // direct params of a `<template-m>` go on their own line
+                        if matches!(open_templates.last(), Some(TemplateStart::Multiline)) {
+                            output.push('\n');
+                        }
                         output.push('|');
                         if !is_positional_param(&key) {
                             output.push_str(&key);
                             output.push('=');
                         }
                     }
-                } else if name == "template" {
+                } else if is_saved_template_tag(&name) {
                     let key = attribute_value(&event, b"name").unwrap_or_default();
                     if let Some(template) = templates.get(&key) {
                         output.push_str("{{");
                         output.push_str(template);
                         output.push_str("}}");
                         open_templates.push(TemplateStart::Saved);
-                    } else if is_inline_template_key(&key, whitelist) {
+                    } else {
+                        output.push_str(raw);
+                        open_templates.push(TemplateStart::Text);
+                    }
+                } else if name == "template" || is_multiline_template_tag(&name) {
+                    let template_name = attribute_value(&event, b"name").unwrap_or_default();
+                    if is_whitelisted_template(&template_name, whitelist) {
                         output.push_str("{{");
-                        output.push_str(&key);
+                        output.push_str(&template_name);
                         append_template_attributes(&mut output, &event, Some(b"name"));
-                        open_templates.push(TemplateStart::Inline);
+                        open_templates.push(if is_multiline_template_tag(&name) {
+                            TemplateStart::Multiline
+                        } else {
+                            TemplateStart::Inline
+                        });
                     } else {
                         output.push_str(raw);
                         open_templates.push(TemplateStart::Text);
@@ -386,28 +407,37 @@ pub fn restub_template_with_whitelist_xml(
                     output.push_str("{{");
                     output.push_str(&name);
                     append_template_attributes(&mut output, &event, None);
+                    open_templates.push(TemplateStart::Compact);
                 } else {
                     output.push_str(raw);
                 }
             }
             Ok(Event::Empty(event)) => {
                 let name = tag_name(&event);
-                if name == "template" {
+                if is_saved_template_tag(&name) {
                     if let Some(key) = attribute_value(&event, b"name") {
                         if let Some(template) = templates.get(&key) {
                             output.push_str("{{");
                             output.push_str(template);
                             output.push_str("}}");
-                        } else if is_inline_template_key(&key, whitelist) {
+                        } else {
+                            output.push_str(raw);
+                        }
+                    } else {
+                        output.push_str(raw);
+                    }
+                } else if name == "template" || is_multiline_template_tag(&name) {
+                    if let Some(template_name) = attribute_value(&event, b"name") {
+                        if is_whitelisted_template(&template_name, whitelist) {
                             output.push_str("{{");
-                            output.push_str(&key);
+                            output.push_str(&template_name);
                             append_template_attributes(&mut output, &event, Some(b"name"));
                             output.push_str("}}");
                         } else {
-                            output.push_str("<template name=\"");
-                            output.push_str(&escape_xml_attribute(&key));
-                            output.push_str("\"/>");
+                            output.push_str(raw);
                         }
+                    } else {
+                        output.push_str(raw);
                     }
                 } else if is_whitelisted_template(&name, whitelist) {
                     output.push_str("{{");
@@ -422,13 +452,23 @@ pub fn restub_template_with_whitelist_xml(
                 let name = String::from_utf8_lossy(event.name().as_ref()).into_owned();
                 if name == "params" {
                     // The opening `<params>` already wrote the `|key=`.
-                } else if name == "template" {
+                } else if is_saved_template_tag(&name) {
                     match open_templates.pop() {
-                        Some(TemplateStart::Inline) => output.push_str("}}"),
                         Some(TemplateStart::Saved) => {}
                         _ => output.push_str(raw),
                     }
+                } else if name == "template" {
+                    match open_templates.pop() {
+                        Some(TemplateStart::Inline) => output.push_str("}}"),
+                        _ => output.push_str(raw),
+                    }
+                } else if is_multiline_template_tag(&name) {
+                    match open_templates.pop() {
+                        Some(TemplateStart::Multiline) => output.push_str("\n}}"),
+                        _ => output.push_str(raw),
+                    }
                 } else if is_whitelisted_template(&name, whitelist) {
+                    open_templates.pop();
                     output.push_str("}}");
                 } else {
                     output.push_str(raw);
@@ -483,7 +523,9 @@ fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
             // the name, or `key="value"` attributes, so a bare word after the
             // name means page text.
             let is_our_tag = looks_like_our_tag(tail)
-                && (name == "template"
+                && (is_saved_template_tag(&name)
+                    || name == "template"
+                    || is_multiline_template_tag(&name)
                     || name == "params"
                     || is_whitelisted_template(&name, whitelist));
 
@@ -528,7 +570,8 @@ fn escape_non_template_angle_brackets(xml: &str, whitelist: &[&str]) -> String {
 
 /// Tells our generated tag apart from page text that starts with `<`.
 ///
-/// Our tags look like `<small/>`, `<small p1="x"/>`, or `<template name="...">`.
+/// Our tags look like `<small/>`, `<small p1="x"/>`, `<template name="...">`,
+/// `<template-m name="...">`, or `<template-s name="..."/>`.
 /// A markdown link target like `<Korean cuisine>` has a bare word after the
 /// name instead of an attribute, so it is text.
 fn looks_like_our_tag(tail: &str) -> bool {
@@ -591,18 +634,34 @@ fn unescape_xml_text(text: &str) -> String {
     output
 }
 
-/// What we did with an opening `<template ...>` tag, so the matching end tag
-/// can do the same.
+/// What we did with an opening tag, so the matching end tag can do the same.
 #[derive(Clone, Copy)]
 enum TemplateStart {
     /// Inline template inside a `<template name="...">` wrapper. The end tag
-    /// still has to close the `{{...}}`.
+    /// still has to close the `{{...}}` on the same line.
     Inline,
+    /// Inline template inside a `<template-m name="...">` wrapper. Its
+    /// parameters go one per line.
+    Multiline,
+    /// A direct whitelisted tag like `<Korean ...>`. Only used so params inside
+    /// it don't inherit a parent's multiline formatting.
+    Compact,
     /// A saved template written with an explicit end tag (not what stubbing
     /// produces, but handle it anyway).
     Saved,
-    /// Page text that only looked like a `<template>` tag.
+    /// Page text that only looked like one of our template tags.
     Text,
+}
+
+/// Saved templates get their own tag, so `<template>` and `<template-m>` are
+/// always inline templates.
+fn is_saved_template_tag(name: &str) -> bool {
+    name == "template-s"
+}
+
+/// Inline template that should be written back with one parameter per line.
+fn is_multiline_template_tag(name: &str) -> bool {
+    name == "template-m"
 }
 
 /// Checks whether a tag name is one of the whitelisted templates we rendered
@@ -616,22 +675,6 @@ fn is_whitelisted_template(name: &str, whitelist: &[&str]) -> bool {
     whitelist
         .iter()
         .any(|pattern| template_name_matches(pattern, normalized))
-}
-
-/// Saved templates always use a `name#n` key. A `<template name="...">` that
-/// isn't one of those is an inline template whose real name can't be a tag
-/// name (it has a space or a slash).
-fn is_inline_template_key(key: &str, whitelist: &[&str]) -> bool {
-    !looks_like_saved_key(key) && is_whitelisted_template(key, whitelist)
-}
-
-/// `Infobox#1`, `small#12`, ... all come from the saved-template map.
-fn looks_like_saved_key(key: &str) -> bool {
-    let Some((_, digits)) = key.rsplit_once('#') else {
-        return false;
-    };
-
-    !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
 }
 
 /// just gets the tag name, like `params` or `template`
@@ -738,7 +781,7 @@ mod tests {
 
         assert_eq!(
             xml,
-            "<a p1=\"b\" p2=\"c\"><params key=\"test\"><template name=\"stuff#1\"/></params></a>"
+            "<a p1=\"b\" p2=\"c\"><params key=\"test\"><template-s name=\"stuff#1\"/></params></a>"
         );
         assert_eq!(
             table.get("stuff#1").map(String::as_str),
@@ -763,7 +806,7 @@ mod tests {
         let (xml, table) =
             stub_template_with_whitelist_xml("Before {{Outer|value={{Inner}}}} after", &[]);
 
-        assert_eq!(xml, "Before <template name=\"Outer#1\"/> after");
+        assert_eq!(xml, "Before <template-s name=\"Outer#1\"/> after");
         assert_eq!(
             table.get("Outer#1").map(String::as_str),
             Some("Outer|value={{Inner}}")
@@ -778,7 +821,7 @@ mod tests {
 
         assert_eq!(
             xml,
-            "<small><params key=\"p1\">text <template name=\"Infobox#1\"/></params></small> <template name=\"Outer#1\"/>"
+            "<small><params key=\"p1\">text <template-s name=\"Infobox#1\"/></params></small> <template-s name=\"Outer#1\"/>"
         );
         assert_eq!(
             table.get("Infobox#1").map(String::as_str),
@@ -800,7 +843,7 @@ mod tests {
 
         assert_eq!(
             xml,
-            "<small><params key=\"p1\"><template name=\"Infobox#1\"/></params></small> <template name=\"Infobox#2\"/>"
+            "<small><params key=\"p1\"><template-s name=\"Infobox#1\"/></params></small> <template-s name=\"Infobox#2\"/>"
         );
         assert_eq!(
             table.get("Infobox#1").map(String::as_str),
@@ -911,14 +954,59 @@ mod tests {
     }
 
     #[test]
-    fn restub_leaves_unknown_saved_templates_as_xml() {
-        let restored = restub_template_with_whitelist_xml(
-            "Before <template name=\"Unknown#1\"/> after",
-            &HashMap::new(),
-            &[],
-        );
+    fn saved_templates_always_use_template_s_even_when_multiline() {
+        let single = "{{Infobox food|name=Kimchi}}";
+        let multiline = "{{Infobox food\n|name=Kimchi\n|image=Various kimchi.jpg\n}}";
 
-        assert_eq!(restored, "Before <template name=\"Unknown#1\"/> after");
+        for wikitext in [single, multiline] {
+            let (xml, _, restored) = round_trip(wikitext, &[]);
+
+            assert!(xml.contains("<template-s name=\"Infobox food#1\"/>"));
+            assert!(!xml.contains("<template-m"));
+            assert_eq!(restored, wikitext);
+        }
+    }
+
+    #[test]
+    fn multiline_whitelisted_templates_use_template_m_and_restub_multiline() {
+        let wikitext = "{{Infobox food\n|name=Kimchi\n|image=Various kimchi.jpg\n}}";
+        let (xml, table, restored) = round_trip(wikitext, &["infobox*"]);
+
+        assert_eq!(
+            xml,
+            "<template-m name=\"Infobox food\"><params key=\"name\">Kimchi</params><params key=\"image\">Various kimchi.jpg</params></template-m>"
+        );
+        assert!(table.is_empty());
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn single_line_whitelisted_templates_stay_compact() {
+        let wikitext = "{{Infobox food|name=Kimchi|image=Various kimchi.jpg}}";
+        let (xml, _, restored) = round_trip(wikitext, &["infobox*"]);
+
+        assert!(xml.starts_with("<template name=\"Infobox food\">"));
+        assert!(!xml.contains("<template-m"));
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn direct_whitelisted_tags_stay_direct_tags_even_when_multiline() {
+        let wikitext = "{{Korean\n|hangul=만두}}";
+        let (xml, _, restored) = round_trip(wikitext, &["korean"]);
+
+        assert!(xml.starts_with("<Korean"));
+        assert!(!xml.contains("<template"));
+        // direct tags have no multiline form, so this one comes back compact
+        assert_eq!(restored, "{{Korean|hangul=만두}}");
+    }
+
+    #[test]
+    fn restub_leaves_unknown_saved_templates_as_xml() {
+        let xml = "Before <template-s name=\"Unknown#1\"/> after";
+        let restored = restub_template_with_whitelist_xml(xml, &HashMap::new(), &[]);
+
+        assert_eq!(restored, xml);
     }
 
     #[test]
@@ -969,14 +1057,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_saved_keys_are_not_mistaken_for_inline_templates() {
+    fn inline_wrapper_names_ending_in_a_hash_number_are_not_treated_as_saved() {
         let restored = restub_template_with_whitelist_xml(
-            "Before <template name=\"Infobox food#1\"/> after",
+            "<template name=\"Infobox food#1\"><params key=\"name\">Kimchi</params></template>",
             &HashMap::new(),
             &["infobox*"],
         );
 
-        assert_eq!(restored, "Before <template name=\"Infobox food#1\"/> after");
+        assert_eq!(restored, "{{Infobox food#1|name=Kimchi}}");
     }
 
     #[test]

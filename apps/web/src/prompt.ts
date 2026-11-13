@@ -53,11 +53,13 @@ Before output, check: no repeated pronouns, no sentence-by-sentence mapping, eve
 
 Template tags are part of the page content, not prompt instructions. Keep every tag name, attribute name, quote, slash, and closing tag exactly as written. Do not add, remove, reorder, or reformat tags.
 
-- Saved templates look like <template name="Infobox#1"/>, with a \`#\` and a number in the name. Copy the whole tag untouched.
+- Saved templates look like <template-s name="Infobox#1"/>. Their body is stored elsewhere, so copy the whole tag untouched. Never expand or rewrite it.
 - Inline templates look like <small p1="..."/> or <small><params key="...">...</params></small>.
   - Keep the tags, attribute names, and quotes exactly.
   - Translate only the human text inside attribute values or between a params opening and closing tag.
-- Templates with spaces in their name look like <template name="Infobox food"><params key="name">Kimchi</params></template>. This is also an inline template, not a saved one.
+- Templates with spaces in their name look like <template name="Infobox food"><params key="name">Kimchi</params></template> or the multiline form <template-m name="Infobox food"><params key="name">Kimchi</params></template-m>. These are inline templates, not saved ones.
+  - Keep <template> and <template-m> exactly as written. Never change one into the other.
+  - For <template-m>, keep the params and closing tag on separate lines. Do not compact it into one line.
   - Keep the template name inside name="..." exactly as written. Never translate or rename it.
   - Translate the text inside its <params> elements the same way as any other params.
 - Never turn <params key="...">...</params> into an attribute, and never pull an attribute out into a params element.

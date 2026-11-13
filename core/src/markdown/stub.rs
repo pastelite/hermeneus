@@ -298,7 +298,7 @@ mod tests {
         );
         assert_eq!(
             stub_links(&without_templates),
-            "<template name=\"Box#1\"/> [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
+            "<template-s name=\"Box#1\"/> [[Image:Soja texturiert.jpg|thumb|Textured soy chunks]] and [[File:other.jpg|alt=Soy|A caption]] and [the Image article](Image)"
         );
     }
 

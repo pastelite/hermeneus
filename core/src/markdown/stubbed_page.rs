@@ -79,7 +79,7 @@ mod tests {
         let wikitext = "{{Box|name=Example}}\n== Title ==\n[[Target|Label]] <ref name=\"source\">Citation</ref>";
         let page = StubbedPage::from(wikitext);
 
-        assert!(page.stubbed.contains("<template name=\"Box#1\"/>"));
+        assert!(page.stubbed.contains("<template-s name=\"Box#1\"/>"));
         assert!(page.stubbed.contains("## Title"));
         assert!(page.stubbed.contains("[Label](Target)"));
         assert!(page.stubbed.contains("[^source]"));
@@ -120,7 +120,7 @@ mod tests {
     #[test]
     fn to_json_serializes_the_page_and_metadata() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] <template name=\"Infobox#1\"/>".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] <template-s name=\"Infobox#1\"/>".to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),
                 "Infobox|name=Example".to_string(),
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn from_json_restores_the_page_and_metadata() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] <template name=\"Infobox#1\"/>".to_string(),
+            stubbed: "[ABC](ABCTranslated) [^source] <template-s name=\"Infobox#1\"/>".to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),
                 "Infobox|name=Example".to_string(),
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn restub_restores_links_references_and_templates() {
         let page = StubbedPage {
-            stubbed: "[ABC](ABCTranslated) [^source] [^2] <template name=\"Infobox#1\"/>"
+            stubbed: "[ABC](ABCTranslated) [^source] [^2] <template-s name=\"Infobox#1\"/>"
                 .to_string(),
             template: HashMap::from([(
                 "Infobox#1".to_string(),

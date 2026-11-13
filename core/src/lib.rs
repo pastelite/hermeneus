@@ -132,13 +132,16 @@ mod tests {
         let restored = page.restub();
 
         // infoboxes have a space in their name, so they stay inline inside a
-        // `<template name="...">` wrapper instead of the saved-template map.
-        assert!(page.stubbed.contains("<template name=\"Infobox food\""));
+        // `<template>` / `<template-m>` wrapper instead of the saved-template map.
+        assert!(
+            page.stubbed.contains("<template name=\"Infobox food\"")
+                || page.stubbed.contains("<template-m name=\"Infobox food\"")
+        );
         assert!(!page
             .template
             .keys()
             .any(|key| key.starts_with("Infobox food#")));
-        assert!(!restored.contains("<template name="));
+        assert!(!restored.contains("<template"));
         assert!(!restored.contains("&lt;"));
         assert!(!restored.contains("&gt;"));
     }
