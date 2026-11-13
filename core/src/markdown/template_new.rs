@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
+
 // Basically uhh, it seems that AI is much better with xml so here is just xml translation
 pub fn stub_template_with_whitelist_xml(
     wikitext: &str,
@@ -30,11 +33,42 @@ fn parse_template_saved(
         .or_insert(1);
     let template_key = format!("{}#{}", template_name, count);
     table.insert(template_key.to_owned(), template.to_owned());
-    format!("<template name=\"{}\"/>", template_key)
+    format!(
+        "<template name=\"{}\"/>",
+        escape_xml_attribute(&template_key)
+    )
 }
 
 // {{a|b|c|test=stuff}} -> <a p1="b" p2="c" test="stuff"/>
 // {{a|b|c|test={{stuff}}}} -> <a p1="b" p2="c"><params key="test"><stuff/></params></a>
+
+/// It's written on the can man.
+/// Basically, if we got "abc {{def}}" and cursor = 4, it will return Some(9), aka the end of template syntax
+///
+/// Returns `None` when the braces never close.
+fn move_to_the_end_of_template(text: &str, start: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut cursor = start;
+
+    while cursor < text.len() {
+        if text[cursor..].starts_with("{{") {
+            depth += 1;
+            cursor += 2;
+        } else if text[cursor..].starts_with("}}") {
+            depth -= 1;
+            cursor += 2;
+
+            if depth == 0 {
+                return Some(cursor);
+            }
+        } else {
+            cursor += text[cursor..].chars().next().unwrap().len_utf8();
+        }
+    }
+
+    None
+}
+
 fn parse_template_whitelist(
     template: &str,
     whitelist: &[&str],
@@ -62,57 +96,44 @@ fn parse_template_whitelist(
     let mut numbered_params = 0;
 
     let mut current_buffer = String::new();
-    let mut param_depth = 0;
-    let mut contain_template = false;
+    let mut cursor = 0;
 
-    let mut chars = template.chars().peekable();
-
-    while let Some(current) = chars.next() {
-        let next_char = chars.peek();
-
+    while cursor < template.len() {
         // so basically, we need to handle the {{abc|{{abc|def}}}} case
         // every {{ = +1
         // every }} = -1
-        // and only when param_depth == 0 | is recognized as the end of a param
-        if param_depth > 0 {
-            if current == '{' && next_char == Some(&'{') {
-                param_depth += 1;
-                current_buffer.push_str("{{");
-                chars.next();
-                contain_template = true;
-            } else if current == '}' && next_char == Some(&'}') {
-                param_depth -= 1;
-                chars.next();
-                current_buffer.push_str("}}");
-            } else {
-                current_buffer.push(current);
+        // ^ this extracted to move_to_the_end_of_template
+        // and only when we are not inside a nested template is | the end of a param
+        if template[cursor..].starts_with("{{") {
+            match move_to_the_end_of_template(&template, cursor) {
+                Some(end) => {
+                    current_buffer.push_str(&template[cursor..end]);
+                    cursor = end;
+                }
+                None => {
+                    current_buffer.push_str(&template[cursor..]);
+                    break;
+                }
             }
+        } else if template[cursor..].starts_with('|') {
+            match split_template_param(&current_buffer) {
+                Some((key, value)) => {
+                    params.push((key.trim().to_string(), value.trim().to_string()));
+                }
+                None => {
+                    numbered_params += 1;
+                    params.push((
+                        format!("p{}", numbered_params),
+                        current_buffer.trim().to_string(),
+                    ));
+                }
+            };
+            current_buffer.clear();
+            cursor += 1;
         } else {
-            if current == '{' && next_char == Some(&'{') {
-                param_depth = 1;
-                current_buffer.push_str("{{");
-                chars.next();
-                contain_template = true;
-            } else if current == '|' {
-                // let (key, value) = current_buffer.split_once('=').unwrap();
-                // params.insert(key.trim().to_string(), value.trim().to_string());
-                // current_buffer.clear();
-                match split_template_param(&current_buffer) {
-                    Some((key, value)) => {
-                        params.push((key.trim().to_string(), value.trim().to_string()));
-                    }
-                    None => {
-                        numbered_params += 1;
-                        params.push((
-                            format!("p{}", numbered_params),
-                            current_buffer.trim().to_string(),
-                        ));
-                    }
-                };
-                current_buffer.clear();
-            } else {
-                current_buffer.push(current);
-            }
+            let current = template[cursor..].chars().next().unwrap();
+            current_buffer.push(current);
+            cursor += current.len_utf8();
         }
     }
     if !current_buffer.is_empty() {
@@ -130,30 +151,27 @@ fn parse_template_whitelist(
         };
     }
 
-    if contain_template {
-        let mut attrs = String::new();
-        let mut nested_params = String::new();
-        for (key, value) in params {
-            if value.contains("{{") {
-                nested_params.push_str(&format!(
-                    "<params key=\"{}\">{}</params>",
-                    key,
-                    render_nested_templates(&value, whitelist, table, template_counts)
-                ));
-            } else {
-                attrs.push_str(&format!(" {}=\"{}\"", key, value));
-            }
+    let mut attrs = String::new();
+    let mut params_xml = String::new();
+    for (key, value) in params {
+        if needs_params_element(&key, &value) {
+            params_xml.push_str(&format!(
+                "<params key=\"{}\">{}</params>",
+                escape_xml_attribute(&key),
+                render_nested_templates(&value, whitelist, table, template_counts)
+            ));
+        } else {
+            attrs.push_str(&format!(" {}=\"{}\"", key, escape_xml_attribute(&value)));
         }
+    }
+
+    if params_xml.is_empty() {
+        format!("<{}{}/>", template_name, attrs)
+    } else {
         format!(
             "<{}{}>{}</{}>",
-            template_name, attrs, nested_params, template_name
+            template_name, attrs, params_xml, template_name
         )
-    } else {
-        let mut params_xml = String::new();
-        for (key, value) in params {
-            params_xml.push_str(&format!(" {}=\"{}\"", key, value));
-        }
-        format!("<{}{}/>", template_name, params_xml)
     }
 }
 
@@ -164,17 +182,16 @@ fn split_template_param(param: &str) -> Option<(&str, &str)> {
     let mut chars = param.char_indices().peekable();
 
     while let Some((index, current)) = chars.next() {
-        match current {
-            '{' if chars.peek().is_some_and(|(_, next)| *next == '{') => {
-                chars.next();
-                depth += 1;
-            }
-            '}' if chars.peek().is_some_and(|(_, next)| *next == '}') => {
-                chars.next();
-                depth -= 1;
-            }
-            '=' if depth == 0 => return Some((&param[..index], &param[index + 1..])),
-            _ => {}
+        let next_char = chars.peek().map(|(_, next)| *next);
+
+        if current == '{' && next_char == Some('{') {
+            chars.next();
+            depth += 1;
+        } else if current == '}' && next_char == Some('}') {
+            chars.next();
+            depth -= 1;
+        } else if current == '=' && depth == 0 {
+            return Some((&param[..index], &param[index + 1..]));
         }
     }
 
@@ -194,27 +211,8 @@ fn render_nested_templates(
         let rest = &text[index..];
 
         if rest.starts_with("{{") {
-            let start = index + 2;
-            let mut depth = 1;
-            let mut cursor = start;
-
-            while cursor < text.len() {
-                if text[cursor..].starts_with("{{") {
-                    depth += 1;
-                    cursor += 2;
-                } else if text[cursor..].starts_with("}}") {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                    cursor += 2;
-                } else {
-                    cursor += text[cursor..].chars().next().unwrap().len_utf8();
-                }
-            }
-
-            if depth == 0 {
-                let template = &text[start..cursor];
+            if let Some(end) = move_to_the_end_of_template(text, index) {
+                let template = &text[index + 2..end - 2];
                 let template_name = match template.find('|') {
                     Some(num) => &template[..num],
                     None => template,
@@ -240,7 +238,7 @@ fn render_nested_templates(
                     output.push_str(&parse_template_saved(template, table, template_counts));
                 }
 
-                index = cursor + 2;
+                index = end;
                 continue;
             }
 
@@ -249,7 +247,7 @@ fn render_nested_templates(
             index += 2;
         } else {
             let ch = rest.chars().next().unwrap();
-            output.push(ch);
+            push_escaped_xml_text(&mut output, ch);
             index += ch.len_utf8();
         }
     }
@@ -257,6 +255,174 @@ fn render_nested_templates(
     output
 }
 
+fn push_escaped_xml_text(output: &mut String, ch: char) {
+    match ch {
+        '&' => output.push_str("&amp;"),
+        '<' => output.push_str("&lt;"),
+        '>' => output.push_str("&gt;"),
+        _ => output.push(ch),
+    }
+}
+
+fn escape_xml_attribute(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// Named parameters can only be written as XML attributes when their key is a
+/// valid XML name. Otherwise they are emitted as `<params>` elements.
+fn needs_params_element(key: &str, value: &str) -> bool {
+    value.contains("{{")
+        || !is_valid_xml_name(key)
+        || value
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r' | '\t'))
+}
+
+fn is_valid_xml_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first == '_' || first == ':' || first.is_alphabetic()) {
+        return false;
+    }
+    chars.all(|character| {
+        character == '_'
+            || character == ':'
+            || character == '-'
+            || character == '.'
+            || character.is_alphanumeric()
+    })
+}
+
+/// Restores the XML-like template output to MediaWiki wikitext.
+///
+/// Saved templates are looked up in `templates`; a missing key is left as its
+/// `<template name="..."/>` element so no template content is fabricated.
+pub fn restub_template_with_whitelist_xml(
+    xml: &str,
+    templates: &HashMap<String, String>,
+) -> String {
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    let mut output = String::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = tag_name(&event);
+                if name == "params" {
+                    if let Some(key) = attribute_value(&event, b"key") {
+                        output.push('|');
+                        if !is_positional_param(&key) {
+                            output.push_str(&key);
+                            output.push('=');
+                        }
+                    }
+                } else {
+                    output.push_str("{{");
+                    output.push_str(&name);
+                    append_template_attributes(&mut output, &event);
+                }
+            }
+            Ok(Event::Empty(event)) => {
+                let name = tag_name(&event);
+                if name == "template" {
+                    if let Some(key) = attribute_value(&event, b"name") {
+                        if let Some(template) = templates.get(&key) {
+                            output.push_str("{{");
+                            output.push_str(template);
+                            output.push_str("}}");
+                        } else {
+                            output.push_str("<template name=\"");
+                            output.push_str(&escape_xml_attribute(&key));
+                            output.push_str("\"/>");
+                        }
+                    }
+                } else {
+                    output.push_str("{{");
+                    output.push_str(&name);
+                    append_template_attributes(&mut output, &event);
+                    output.push_str("}}");
+                }
+            }
+            Ok(Event::End(event)) => {
+                if event.name().as_ref() != b"params" {
+                    output.push_str("}}");
+                }
+            }
+            Ok(Event::Text(text)) => match text.unescape() {
+                Ok(text) => output.push_str(&text),
+                Err(_) => output.push_str(&String::from_utf8_lossy(text.as_ref())),
+            },
+            Ok(Event::CData(text)) => output.push_str(&String::from_utf8_lossy(text.as_ref())),
+            Ok(Event::Eof) => break,
+            Ok(_) => {}
+            Err(_) => return xml.to_string(),
+        }
+        buffer.clear();
+    }
+
+    output
+}
+
+/// just gets the tag name, like `params` or `template`
+fn tag_name(event: &BytesStart<'_>) -> String {
+    String::from_utf8_lossy(event.name().as_ref()).into_owned()
+}
+
+/// just finds one attribute on the tag and gives back its unescaped value
+/// aka. (<abc params="d">, "params") -> Some("d")
+/// Basically just a helper to make quick xml life easier
+fn attribute_value(event: &BytesStart<'_>, key: &[u8]) -> Option<String> {
+    event
+        .attributes()
+        .with_checks(false)
+        .flatten()
+        .find(|attribute| attribute.key.as_ref() == key)
+        .and_then(|attribute| attribute.unescape_value().ok())
+        .map(|value| value.into_owned())
+}
+
+/// turns all the attributes back into |params.
+/// p1, p2, ... are positional, so they stay as just |value
+/// everything else becomes |key=value
+fn append_template_attributes(output: &mut String, event: &BytesStart<'_>) {
+    for attribute in event.attributes().with_checks(false).flatten() {
+        let key = String::from_utf8_lossy(attribute.key.as_ref());
+        let value = attribute
+            .unescape_value()
+            .map(|value| value.into_owned())
+            .unwrap_or_default();
+
+        output.push('|');
+        if !is_positional_param(&key) {
+            output.push_str(&key);
+            output.push('=');
+        }
+        output.push_str(&value);
+    }
+}
+
+/// so we make every params without a key to begin with p. this is just check that
+fn is_positional_param(key: &str) -> bool {
+    let Some(digits) = key.strip_prefix('p') else {
+        return false;
+    };
+    !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+}
+
+/// just matching the whitelist
 fn template_name_matches(pattern: &str, template_name: &str) -> bool {
     let Some(prefix) = pattern.strip_suffix('*') else {
         return pattern.eq_ignore_ascii_case(template_name);
@@ -265,7 +431,6 @@ fn template_name_matches(pattern: &str, template_name: &str) -> bool {
         .get(..prefix.len())
         .is_some_and(|name_prefix| name_prefix.eq_ignore_ascii_case(prefix))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,6 +441,12 @@ mod tests {
         let output =
             parse_template_whitelist(template, whitelist, &mut table, &mut template_counts);
         (output, table)
+    }
+
+    fn round_trip(wikitext: &str, whitelist: &[&str]) -> (String, HashMap<String, String>, String) {
+        let (xml, table) = stub_template_with_whitelist_xml(wikitext, whitelist);
+        let restored = restub_template_with_whitelist_xml(&xml, &table);
+        (xml, table, restored)
     }
 
     #[test]
@@ -403,6 +574,92 @@ mod tests {
             split_template_param("key={{Other|a=b}}"),
             Some(("key", "{{Other|a=b}}"))
         );
+    }
+
+    #[test]
+    fn restub_restores_inline_and_nested_templates() {
+        let wikitext = "Before {{a|b|c|test=stuff}} {{a|b|c|test={{stuff}}}} after";
+        let (_, _, restored) = round_trip(wikitext, &["a", "stuff"]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_saved_top_level_and_nested_templates() {
+        let wikitext = "Before {{Outer|value={{Inner}}}} after {{Sibling|name=soy}}.";
+        let (_, _, restored) = round_trip(wikitext, &[]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_mixed_inline_and_saved_templates() {
+        let wikitext = "{{small|text {{Infobox|name=x}}}} {{Outer|{{small|hi}}}}";
+        let (_, _, restored) = round_trip(wikitext, &["small"]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_wildcard_nested_templates() {
+        let wikitext = "{{langx|{{lang-en|hi}}}}";
+        let (_, _, restored) = round_trip(wikitext, &["lang*"]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_xml_special_characters() {
+        let wikitext = "A & B < C {{small|a & b \"quoted\" <tag>}}";
+        let (xml, _, restored) = round_trip(wikitext, &["small"]);
+
+        assert!(xml.contains("&amp;"));
+        assert!(xml.contains("&quot;"));
+        assert!(xml.contains("&lt;"));
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_repeated_saved_template_counts() {
+        let wikitext = "{{small|{{Infobox|nested}}}} {{Infobox|top}}";
+        let (_, _, restored) = round_trip(wikitext, &["small"]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_parameter_keys_that_cannot_be_xml_attributes() {
+        let wikitext = "{{small|1=first|some key=second}}";
+        let (xml, _, restored) = round_trip(wikitext, &["small"]);
+
+        assert!(xml.contains("<params key=\"1\">first</params>"));
+        assert!(xml.contains("<params key=\"some key\">second</params>"));
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_restores_parameter_values_with_newlines() {
+        let wikitext = "{{small|line1\nline2}}";
+        let (_, _, restored) = round_trip(wikitext, &["small"]);
+
+        assert_eq!(restored, wikitext);
+    }
+
+    #[test]
+    fn restub_leaves_unknown_saved_templates_as_xml() {
+        let restored = restub_template_with_whitelist_xml(
+            "Before <template name=\"Unknown#1\"/> after",
+            &HashMap::new(),
+        );
+
+        assert_eq!(restored, "Before <template name=\"Unknown#1\"/> after");
+    }
+
+    #[test]
+    fn restub_restores_unbalanced_template_text() {
+        let (_, _, restored) = round_trip("Before {{unclosed", &["unclosed"]);
+
+        assert_eq!(restored, "Before {{unclosed");
     }
 
     #[test]
